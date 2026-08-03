@@ -174,7 +174,7 @@ def load_and_parse_file(uploaded_file):
   elif 'Email' not in df.columns:
     df['Email'] = ''
 
-  # Deduplicate duplicate column names to prevent Arrow/Streamlit crashes
+  # Deduplicate duplicate column names to prevent Streamlit crashes
   cols = pd.Series(df.columns)
   for dup in cols[cols.duplicated()].unique():
     cols[cols == dup] = [
@@ -306,10 +306,10 @@ def build_html_body(
 # ==========================================
 
 st.set_page_config(
-    page_title='Smart Outreach Portal', page_icon='📧', layout='wide'
+    page_title='Smart Outreach Portal (v2)', page_icon='📧', layout='wide'
 )
 
-st.title('📧 Smart Segmented Outreach & CRM Portal')
+st.title('📧 Smart Segmented Outreach & CRM Portal (v2)')
 
 if 'is_sending' not in st.session_state:
   st.session_state.is_sending = False
@@ -368,19 +368,48 @@ with tab1:
     pitch_templates = {}
 
     if use_smart_routing:
+      # Smart selection logic: Find best non-unique default column (Designation, Department, etc.)
+      default_index = 0
+      target_keywords = [
+          'designation',
+          'department',
+          'category',
+          'segment',
+          'type',
+          'place',
+          'role',
+      ]
+      for idx, col in enumerate(df_clean.columns):
+        if any(k in col.lower() for k in target_keywords):
+          default_index = idx
+          break
+
       segment_col = st.selectbox(
           'Select the Column to Segment By:',
           options=df_clean.columns,
-          index=0,
-          help='Select a column like "Segment", "Department", or "Designation"',
+          index=default_index,
+          help=(
+              'Pick a grouping column like Designation, Department, or'
+              ' Category (Avoid picking Email/Name)'
+          ),
       )
 
       unique_segments = [
           str(val).strip() for val in df_clean[segment_col].unique() if val
       ]
+
+      if len(unique_segments) > 15:
+        st.warning(
+            f'⚠️ Found {len(unique_segments)} unique values in'
+            f' `{segment_col}`. If every row creates a tab, please select a'
+            ' broader grouping column (like Designation or Department)'
+            ' instead.'
+        )
+
       st.info(
-          f'Found {len(unique_segments)} unique category value(s) in'
-          f' `{segment_col}`: {", ".join(unique_segments)}'
+          f'Found {len(unique_segments)} category group(s) in'
+          f' `{segment_col}`: {", ".join(unique_segments[:10])}'
+          + ('...' if len(unique_segments) > 10 else '')
       )
 
       # Create dynamic tabs for each target category in the CSV
@@ -391,12 +420,12 @@ with tab1:
           st.subheader(f'Pitch for Segment: {cat_name}')
           sub_val = st.text_input(
               f'Subject Line for {cat_name}',
-              value=f'Tailored Proposal for {{{segment_col}}} — {{Name}}',
+              value=f'Tailored Proposal for {cat_name} — {{Name}}',
               key=f'sub_{idx}',
           )
           body_val = st.text_area(
               f'Email Body for {cat_name}',
-              value=f"""Dear {{Name}},\n\nSince you are leading work in {cat_name}, we thought this proposal would be especially relevant to your team.\n\nPlease find details attached.\n\nBest regards,\n{{sender_name}}""",
+              value=f"""Dear {{Name}},\n\nSince you are leading work as {cat_name}, we thought this proposal would be especially relevant to your team.\n\nPlease find details attached.\n\nBest regards,\n{{sender_name}}""",
               height=180,
               key=f'body_{idx}',
           )
