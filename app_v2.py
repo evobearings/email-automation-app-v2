@@ -141,20 +141,23 @@ def load_and_parse_file(uploaded_file):
   df = df.fillna('').astype(str)
   df.columns = [str(col).strip() for col in df.columns]
 
-  # Identify Name column dynamically BEFORE renaming
-  name_col = None
+  # Map common column name aliases
   for col in df.columns:
-    if any(
-        k in col.lower()
-        for k in ['name', 'contact', 'person', 'recipient', 'university']
-    ):
-      name_col = col
-      break
+    c_lower = col.lower()
+    if any(k in c_lower for k in ['name', 'contact', 'person', 'recipient']):
+      if col != 'Email':
+        df.rename(columns={col: 'Name'}, inplace=True)
+    elif any(k in c_lower for k in ['university', 'college', 'institution']):
+      df.rename(columns={col: 'University'}, inplace=True)
+    elif any(k in c_lower for k in ['dept', 'department']):
+      df.rename(columns={col: 'Department'}, inplace=True)
 
-  if name_col and name_col != 'Email':
-    df.rename(columns={name_col: 'Name'}, inplace=True)
-  elif 'Name' not in df.columns:
+  if 'Name' not in df.columns:
     df['Name'] = 'Valued Partner'
+  if 'University' not in df.columns:
+    df['University'] = 'your institution'
+  if 'Department' not in df.columns:
+    df['Department'] = 'your department'
 
   # Identify Email column dynamically
   email_col = None
@@ -174,7 +177,7 @@ def load_and_parse_file(uploaded_file):
   elif 'Email' not in df.columns:
     df['Email'] = ''
 
-  # Deduplicate duplicate column names to prevent Streamlit crashes
+  # Deduplicate column names to prevent Arrow/Streamlit crashes
   cols = pd.Series(df.columns)
   for dup in cols[cols.duplicated()].unique():
     cols[cols == dup] = [
@@ -306,10 +309,10 @@ def build_html_body(
 # ==========================================
 
 st.set_page_config(
-    page_title='Smart Outreach Portal (v2)', page_icon='📧', layout='wide'
+    page_title='Outreach Portal (v2)', page_icon='📧', layout='wide'
 )
 
-st.title('📧 Smart Segmented Outreach & CRM Portal (v2)')
+st.title('📧 Outreach & CRM Portal (v2)')
 
 if 'is_sending' not in st.session_state:
   st.session_state.is_sending = False
@@ -319,11 +322,13 @@ st.sidebar.header('⚙️ Sender Credentials')
 sender_name = st.sidebar.text_input(
     'Sender Display Name', value='EVO Network Bharat'
 )
-sender_email = st.sidebar.text_input('Sender Email', value='')
+sender_email = st.sidebar.text_input('Sender Email', value='evoalpha30@gmail.com')
 sender_password = st.sidebar.text_input(
     'App Password (16-char)', type='password'
 )
-cc_email = st.sidebar.text_input('CC Recipient (Optional)', value='')
+cc_email = st.sidebar.text_input(
+    'CC Recipient (Optional)', value='lakshyarajdevgurujaiswal@gmail.com'
+)
 
 smtp_server = st.sidebar.text_input('SMTP Server', value='smtp.gmail.com')
 smtp_port = st.sidebar.number_input('SMTP Port', value=465)
@@ -353,113 +358,54 @@ with tab1:
           ' already emailed in the past 24 hours.'
       )
 
-    st.markdown('##### 💡 Available Personalization Placeholders')
+    st.markdown('##### 💡 Dynamic Placeholders Ready to Use')
     tags_display = ' '.join([f'`{{{col}}}`' for col in df_clean.columns])
     st.markdown(tags_display)
 
     with st.expander('Preview Recipient Data Table'):
       st.dataframe(df_clean)
 
-    st.header('2. Smart Pitch Routing Engine')
-    use_smart_routing = st.checkbox(
-        '🎯 Enable Segment-Based Smart Routing (Strategy 1)', value=True
+    st.header('2. Email Pitch Template')
+
+    sub_val = st.text_input(
+        'Subject Line',
+        value='Bringing browser-based quantum computing to {University}',
+        key='single_sub',
     )
 
-    pitch_templates = {}
+    body_val = st.text_area(
+        'Email Body',
+        value="""Dear {Name},
 
-    if use_smart_routing:
-      # Smart selection logic: Find best non-unique default column (Designation, Department, etc.)
-      default_index = 0
-      target_keywords = [
-          'designation',
-          'department',
-          'category',
-          'segment',
-          'type',
-          'place',
-          'role',
-      ]
-      for idx, col in enumerate(df_clean.columns):
-        if any(k in col.lower() for k in target_keywords):
-          default_index = idx
-          break
+I hope this email finds you well.
 
-      segment_col = st.selectbox(
-          'Select the Column to Segment By:',
-          options=df_clean.columns,
-          index=default_index,
-          help=(
-              'Pick a grouping column like Designation, Department, or'
-              ' Category (Avoid picking Email/Name)'
-          ),
-      )
+As quantum technologies move from theoretical physics into mainstream software engineering, biotechnology, and chemistry, leading global universities are racing to prepare their students for the quantum workforce. However, setting up physical labs or command-line coding kits often introduces major friction, licensing costs, and steep learning curves.
 
-      unique_segments = [
-          str(val).strip() for val in df_clean[segment_col].unique() if val
-      ]
+We would like to introduce Alpha ParadoxQC—the world’s first integrated, browser-based Quantum Computing Education and Research Platform.
 
-      if len(unique_segments) > 15:
-        st.warning(
-            f'⚠️ Found {len(unique_segments)} unique values in'
-            f' `{segment_col}`. If every row creates a tab, please select a'
-            ' broader grouping column (like Designation or Department)'
-            ' instead.'
-        )
+Our platform completely eliminates setup hurdles by providing:
+• Interactive Quantum Circuit Builder: Visual multi-qubit design, local simulations, and direct QPU execution to real quantum machines (IonQ, Rigetti, IQM).
+• Quantum Chemistry (VQE) Simulator: Visualizing ground-state energies for 30+ molecules and a Custom Molecule Inventor for student research.
+• Pharma & Drug Discovery Module: Live visual docking simulators (like COX-2 COX inhibitors), automated ADMET profiling, and Lipinski Rule-of-Five checks.
 
-      st.info(
-          f'Found {len(unique_segments)} category group(s) in'
-          f' `{segment_col}`: {", ".join(unique_segments[:10])}'
-          + ('...' if len(unique_segments) > 10 else '')
-      )
+Our Proposal to {University}:
+We are currently selecting forward-thinking Indian universities to receive a Free, Custom Live Demonstration of the platform for your science and engineering faculty in {Department}. Following this interactive demo, we can set up a structured pilot program, paving the way for an Annual Rate Contract (ARC) to equip your entire student body with personal, cloud-based quantum sandboxes.
 
-      # Create dynamic tabs for each target category in the CSV
-      cat_tabs = st.tabs(unique_segments + ['Default Fallback'])
+EVO Network Bharat Private Limited (an initiative by Lakshya Raj Devguru Jaiswal) is the official implementation and marketing partner for this academic roll-out.
 
-      for idx, cat_name in enumerate(unique_segments):
-        with cat_tabs[idx]:
-          st.subheader(f'Pitch for Segment: {cat_name}')
-          sub_val = st.text_input(
-              f'Subject Line for {cat_name}',
-              value=f'Tailored Proposal for {cat_name} — {{Name}}',
-              key=f'sub_{idx}',
-          )
-          body_val = st.text_area(
-              f'Email Body for {cat_name}',
-              value=f"""Dear {{Name}},\n\nSince you are leading work as {cat_name}, we thought this proposal would be especially relevant to your team.\n\nPlease find details attached.\n\nBest regards,\n{{sender_name}}""",
-              height=180,
-              key=f'body_{idx}',
-          )
-          pitch_templates[cat_name] = {'subject': sub_val, 'body': body_val}
+We would love to discuss how we can deploy this trial for your departments and explore a long-term partnership. Please let us know when we can connect for a detailed discussion, which we can hold virtually or in person at your campus.
 
-      with cat_tabs[-1]:
-        st.subheader('Default Pitch (Fallback for missing values)')
-        def_sub = st.text_input(
-            'Default Subject Line',
-            value='Collaboration Proposal — {Name}',
-            key='sub_def',
-        )
-        def_body = st.text_area(
-            'Default Body',
-            value="""Dear {Name},\n\nI hope this email finds you well. Please review our proposal attached below.\n\nBest regards,\n{sender_name}""",
-            height=180,
-            key='body_def',
-        )
-        pitch_templates['__DEFAULT__'] = {'subject': def_sub, 'body': def_body}
+Please feel free to reach back directly at the coordinates listed below.
 
-    else:
-      st.subheader('Standard Pitch Template')
-      def_sub = st.text_input(
-          'Subject Line',
-          value='Collaboration Proposal for {Name}',
-          key='single_sub',
-      )
-      def_body = st.text_area(
-          'Email Body',
-          value="""Dear {Name},\n\nI hope this email finds you well.\n\nPlease find our attached proposal for your review.\n\nBest regards,\n{sender_name}""",
-          height=200,
-          key='single_body',
-      )
-      pitch_templates['__DEFAULT__'] = {'subject': def_sub, 'body': def_body}
+Sincerely,
+
+EVO Network Bharat Private Limited 
+Phone: +91 6293755931 / +91 9831356591
+Email: evoalpha30@gmail.com
+Website: www.alphaparadoxqc.com""",
+        height=380,
+        key='single_body',
+    )
 
     with st.expander('📎 Attachments & Media Links', expanded=False):
       gdrive_link_1 = st.text_input(
@@ -484,7 +430,7 @@ with tab1:
 
     st.header('3. Campaign Controls')
     delay_range = st.slider(
-        '⏱️ Throttling Delay (Seconds):',
+        '⏱️ Delay Between Emails (Seconds):',
         min_value=5,
         max_value=300,
         value=(30, 60),
@@ -495,7 +441,7 @@ with tab1:
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
       start_clicked = st.button(
-          '🚀 Start Smart Campaign',
+          '🚀 Start Campaign',
           disabled=st.session_state.is_sending,
           key='start1',
       )
@@ -538,17 +484,8 @@ with tab1:
             recipient_email = str(row_dict.get('Email', '')).strip()
             recipient_name = str(row_dict.get('Name', 'Valued Partner')).strip()
 
-            # Select Pitch Template dynamically based on strategy
-            if use_smart_routing:
-              seg_val = str(row_dict.get(segment_col, '')).strip()
-              pitch = pitch_templates.get(
-                  seg_val, pitch_templates['__DEFAULT__']
-              )
-            else:
-              pitch = pitch_templates['__DEFAULT__']
-
-            rendered_body = render_template(pitch['body'], row_dict)
-            rendered_subject = render_template(pitch['subject'], row_dict)
+            rendered_body = render_template(body_val, row_dict)
+            rendered_subject = render_template(sub_val, row_dict)
 
             html_body = build_html_body(
                 rendered_body,
@@ -610,7 +547,7 @@ with tab1:
 
           server.quit()
           if st.session_state.is_sending:
-            st.success('🎉 Smart Campaign completed successfully!')
+            st.success('🎉 Campaign completed successfully!')
           st.session_state.is_sending = False
 
         except Exception as e:
@@ -648,14 +585,15 @@ with tab2:
   if not candidates.empty:
     fu_subject = st.text_input(
         'Follow-Up Subject Line',
-        value='Following up on our proposal',
+        value='Following up on our proposal for {University}',
         key='main_fs1',
     )
     fu_body = st.text_area(
         'Follow-Up Body Template',
         value=(
-            'Hi {name},\n\nI am following up on my previous message. Let me know'
-            ' if you would be open to connecting.\n\nBest,'
+            'Hi {Name},\n\nI am following up on my previous message regarding'
+            ' Alpha ParadoxQC for {University}. Let me know if you would be open'
+            ' to connecting.\n\nBest regards,\nEVO Network Bharat'
         ),
         height=150,
         key='body2',
@@ -680,7 +618,7 @@ with tab2:
         server.login(sender_email, sender_password)
         for i, (_, row) in enumerate(candidates.iterrows()):
           rec = row['email']
-          p_body = fu_body.replace('{name}', row['name'])
+          p_body = fu_body.replace('{Name}', row['name'])
           html_b = build_html_body(p_body)
 
           msg = MIMEMultipart('alternative')
