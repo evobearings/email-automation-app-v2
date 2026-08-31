@@ -25,55 +25,76 @@ def init_db():
         CREATE TABLE IF NOT EXISTS sent_emails (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
-            university TEXT,
+            company TEXT,
+            designation TEXT,
             department TEXT,
+            city TEXT,
             email TEXT UNIQUE,
             initial_sent_date TIMESTAMP,
             status TEXT DEFAULT 'Pending',
             followup_sent_date TIMESTAMP
         )
     """)
+
   # Migration checks for existing databases
   cursor.execute("PRAGMA table_info(sent_emails)")
-  columns = [col[1] for col in cursor.fetchall()]
-  if "university" not in columns:
-    cursor.execute(
-        "ALTER TABLE sent_emails ADD COLUMN university TEXT DEFAULT ''"
-    )
-  if "department" not in columns:
-    cursor.execute(
-        "ALTER TABLE sent_emails ADD COLUMN department TEXT DEFAULT ''"
-    )
+  existing_cols = [col[1] for col in cursor.fetchall()]
+
+  new_cols = {
+      "company": "TEXT DEFAULT ''",
+      "designation": "TEXT DEFAULT ''",
+      "department": "TEXT DEFAULT ''",
+      "city": "TEXT DEFAULT ''",
+      "university": "TEXT DEFAULT ''",
+  }
+
+  for col_name, col_def in new_cols.items():
+    if col_name not in existing_cols:
+      cursor.execute(
+          f"ALTER TABLE sent_emails ADD COLUMN {col_name} {col_def}"
+      )
+
   conn.commit()
   conn.close()
 
 
 def log_initial_email(
-    name: str, email: str, university: str = "", department: str = ""
+    name: str,
+    email: str,
+    company: str = "",
+    designation: str = "",
+    department: str = "",
+    city: str = "",
 ):
   conn = sqlite3.connect("campaigns.db")
   cursor = conn.cursor()
   now = datetime.now()
   cursor.execute(
       """
-        INSERT INTO sent_emails (name, university, department, email, initial_sent_date, status)
-        VALUES (?, ?, ?, ?, ?, 'Pending')
+        INSERT INTO sent_emails (name, company, designation, department, city, email, initial_sent_date, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')
         ON CONFLICT(email) DO UPDATE SET
             name=?,
-            university=?,
+            company=?,
+            designation=?,
             department=?,
+            city=?,
             initial_sent_date=?,
             status='Pending'
     """,
       (
           name,
-          university,
+          company,
+          designation,
           department,
+          city,
           email.lower(),
           now,
           name,
-          university,
+          company,
+          designation,
           department,
+          city,
           now,
       ),
   )
@@ -139,7 +160,7 @@ def fetch_followup_candidates(days_threshold=15):
   cutoff_date = datetime.now() - timedelta(days=days_threshold)
   df = pd.read_sql_query(
       """
-        SELECT id, name, university, department, email, initial_sent_date, status
+        SELECT id, name, company, designation, department, city, email, initial_sent_date, status
         FROM sent_emails
         WHERE status = 'Pending' AND initial_sent_date <= ?
     """,
@@ -153,7 +174,7 @@ def fetch_followup_candidates(days_threshold=15):
 init_db()
 
 # ==========================================
-# 2. CONTACT CLEANING & TEMPLATE ENGINE
+# 2. CONTACT CLEANING & TAG PARSER ENGINE
 # ==========================================
 
 EMAIL_REGEX = re.compile(
@@ -176,7 +197,7 @@ def load_and_parse_file(uploaded_file):
   df = df.fillna("").astype(str)
   df.columns = [str(col).strip() for col in df.columns]
 
-  # 1. Identify Email column FIRST to prevent naming conflicts
+  # 1. Identify Email column FIRST to avoid header collisions
   email_col = None
   for col in df.columns:
     if "email" in col.lower() or "mail" in col.lower():
@@ -194,24 +215,67 @@ def load_and_parse_file(uploaded_file):
   elif "Email" not in df.columns:
     df["Email"] = ""
 
-  # 2. Map remaining columns without touching Email
-  for col in df.columns:
-    if col == "Email":
-      continue
-    c_lower = col.lower()
-    if any(k in c_lower for k in ["name", "contact", "person"]):
-      df.rename(columns={col: "Name"}, inplace=True)
-    elif any(k in c_lower for k in ["university", "college", "institution"]):
-      df.rename(columns={col: "University"}, inplace=True)
-    elif any(k in c_lower for k in ["dept", "department"]):
-      df.rename(columns={col: "Department"}, inplace=True)
+  # 2. Smart Column Mapping for Industrial & Commercial Datasets
+  mapping_rules = {
+      "Name": [
+          "name",
+          "contact",
+          "person",
+          "recipient",
+          "client",
+          "manager",
+          "purchaser",
+      ],
+      "Company": [
+          "company",
+          "organization",
+          "firm",
+          "industry",
+          "factory",
+          "plant",
+          "mill",
+          "business",
+          "university",
+          "college",
+          "institution",
+      ],
+      "Designation": [
+          "designation",
+          "role",
+          "title",
+          "position",
+          "post",
+          "job",
+      ],
+      "Department": ["dept", "department", "division", "section"],
+      "City": ["city", "location", "town", "place", "area", "zone"],
+      "State": ["state", "region", "province"],
+      "Product": ["product", "item", "bearing", "spares", "machine"],
+      "Requirement": ["requirement", "need", "demand", "specification"],
+  }
 
+  for target_tag, keywords in mapping_rules.items():
+    if target_tag in df.columns:
+      continue
+    for col in df.columns:
+      if col == "Email":
+        continue
+      c_lower = col.lower()
+      if any(k in c_lower for k in keywords):
+        df.rename(columns={col: target_tag}, inplace=True)
+        break
+
+  # Set defaults for key tags if missing from source file
   if "Name" not in df.columns:
     df["Name"] = "Valued Partner"
-  if "University" not in df.columns:
-    df["University"] = "your institution"
+  if "Company" not in df.columns:
+    df["Company"] = "your company"
+  if "Designation" not in df.columns:
+    df["Designation"] = "Purchase Manager"
   if "Department" not in df.columns:
-    df["Department"] = "your department"
+    df["Department"] = "Procurement & Maintenance"
+  if "City" not in df.columns:
+    df["City"] = "your region"
 
   # Deduplicate column names to prevent Arrow/Streamlit crashes
   cols = pd.Series(df.columns)
@@ -221,7 +285,7 @@ def load_and_parse_file(uploaded_file):
     ]
   df.columns = cols
 
-  # Filter valid emails
+  # Clean emails & remove invalids
   df["Email"] = df["Email"].str.strip().str.lower()
   df = df[df["Email"].str.contains("@", na=False)].copy()
 
@@ -239,7 +303,18 @@ def render_template(template_str: str, row_dict: dict) -> str:
   for key, value in row_dict.items():
     placeholder = f"{{{key}}}"
     if placeholder in rendered:
-      rendered = rendered.replace(placeholder, str(value))
+      val_str = str(value).strip()
+      # Smart fallbacks for empty text cells
+      if not val_str:
+        if key.lower() == "name":
+          val_str = "Valued Partner"
+        elif key.lower() == "company":
+          val_str = "your company"
+        elif key.lower() in ["city", "location"]:
+          val_str = "your area"
+        else:
+          val_str = ""
+      rendered = rendered.replace(placeholder, val_str)
   return rendered
 
 
@@ -287,7 +362,7 @@ def check_inbox_for_replies(
 
 
 # ==========================================
-# 4. EMAIL FORMATTER (HTML Builder)
+# 4. HTML EMAIL BUILDER
 # ==========================================
 
 
@@ -305,29 +380,30 @@ def build_html_body(
   if gdrive_links:
     drive_items = "".join([
         f'<li style="margin-bottom: 8px;"><a href="{l.strip()}" target="_blank"'
-        f' style="color: #1a73e8; {highlight_style}">Google Drive File'
-        f' #{i}</a></li>'
+        f' style="color: #1a73e8; {highlight_style}">Product Catalog / Drive'
+        f' Link #{i}</a></li>'
         for i, l in enumerate(gdrive_links, 1)
         if l and l.strip()
     ])
     if drive_items:
-      links_html += f'<div style="margin-top: 15px;">📁 <b>Drive Links:</b><ul style="margin: 5px 0 0 20px; padding: 0;">{drive_items}</ul></div>'
+      links_html += f'<div style="margin-top: 15px;">📁 <b>Product Catalogs & Docs:</b><ul style="margin: 5px 0 0 20px; padding: 0;">{drive_items}</ul></div>'
 
   if catalog_links:
     cat_items = "".join([
         f'<li style="margin-bottom: 8px;"><a href="{l.strip()}" target="_blank"'
-        f' style="color: #008080; {highlight_style}">Resource Link'
-        f' #{i}</a></li>'
+        f' style="color: #008080; {highlight_style}">Website / Technical'
+        f' Specs #{i}</a></li>'
         for i, l in enumerate(catalog_links, 1)
         if l and l.strip()
     ])
     if cat_items:
-      links_html += f'<div style="margin-top: 15px;">📖 <b>Resources:</b><ul style="margin: 5px 0 0 20px; padding: 0;">{cat_items}</ul></div>'
+      links_html += f'<div style="margin-top: 15px;">📖 <b>Resource & Spec Links:</b><ul style="margin: 5px 0 0 20px; padding: 0;">{cat_items}</ul></div>'
 
   if video_links:
     vid_items = "".join([
         f'<li style="margin-bottom: 8px;"><a href="{l.strip()}" target="_blank"'
-        f' style="color: #d9534f; {highlight_style}">Video Link #{i}</a></li>'
+        f' style="color: #d9534f; {highlight_style}">Product Demo Video'
+        f' #{i}</a></li>'
         for i, l in enumerate(video_links, 1)
         if l and l.strip()
     ])
@@ -357,10 +433,10 @@ def build_html_body(
 # ==========================================
 
 st.set_page_config(
-    page_title="Outreach Portal (v2)", page_icon="📧", layout="wide"
+    page_title="Industrial Outreach Portal", page_icon="⚙️", layout="wide"
 )
 
-st.title("📧 Outreach & CRM Portal (v2)")
+st.title("⚙️ Industrial & Commercial Outreach Portal")
 
 if "is_sending" not in st.session_state:
   st.session_state.is_sending = False
@@ -368,7 +444,8 @@ if "is_sending" not in st.session_state:
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("⚙️ Sender Credentials")
 sender_name = st.sidebar.text_input(
-    "Sender Display Name", value="EVO Network Bharat"
+    "Sender Display Name",
+    value="Lakshya Raj Devguru Jaiswal | EVO Bearings & Mill Stores",
 )
 sender_email = st.sidebar.text_input("Sender Email", value="evoalpha30@gmail.com")
 sender_password = st.sidebar.text_input(
@@ -383,7 +460,7 @@ smtp_port = st.sidebar.number_input("SMTP Port", value=587)
 use_ssl = st.sidebar.checkbox(
     "Use SSL Connection (Port 465)",
     value=False,
-    help="Uncheck to use Port 587 with STARTTLS (Required on Render)",
+    help="Uncheck to use Port 587 with STARTTLS (Recommended)",
 )
 imap_server = st.sidebar.text_input("IMAP Server", value="imap.gmail.com")
 
@@ -410,231 +487,246 @@ with tab1:
           " already emailed in the past 24 hours."
       )
 
-    st.markdown("##### 💡 Dynamic Placeholders Ready to Use")
+    st.markdown("##### 💡 Dynamic Placeholders Extracted from Your Sheet")
     tags_display = " ".join([f"`{{{col}}}`" for col in df_clean.columns])
     st.markdown(tags_display)
-
-    with st.expander("Preview Recipient Data Table"):
-      st.dataframe(df_clean)
-
-    st.header("2. Email Pitch Template")
-
-    sub_val = st.text_input(
-        "Subject Line",
-        value="Bringing browser-based quantum computing to {University}",
-        key="single_sub",
+    st.caption(
+        "You can use any tag above inside your Subject line or Email body!"
     )
 
-    body_val = st.text_area(
-        "Email Body",
-        value="""Dear {Name},
+    with st.expander("Preview Parsed Data Table"):
+      st.dataframe(df_clean)
 
-I'm Lakshya Raj Devguru Jaiswal, and I'd like to introduce India Bearings & Mill Stores and EVO Bearings and Machineries Pvt. Ltd. — reliable industrial suppliers serving tube and steel manufacturers across Kolkata.
+  st.header("2. Email Pitch Template")
+
+  # Mandatory Subject line set to user specification
+  sub_val = st.text_input(
+      "Subject Line",
+      value="Bearings & industrial supply partnership",
+      key="single_sub",
+      help="Required Subject Line. You can append placeholders like: Bearings & industrial supply partnership - {Company}",
+  )
+
+  body_val = st.text_area(
+      "Email Body",
+      value="""Dear {Name},
+
+I am Lakshya Raj Devguru Jaiswal, representing India Bearings & Mill Stores and EVO Bearings and Machineries Pvt. Ltd. — reliable industrial suppliers serving manufacturing plants, steel mills, tube manufacturers, and heavy industrial facilities across {City}.
 
 WHAT WE SUPPLY
-- Bearings (All Types)
+- Bearings (Ball, Taper Roller, Spherical, Needle & Pillow Blocks)
 - V-Belts, Chains & Sprockets
-- Plummer Blocks, UC Pillow Blocks, Adaptor Sleeves
-- Crusher Spares & Accessories
-- Rollers, Grease & Lubricants
+- Plummer Blocks, Adaptor Sleeves & Couplings
+- Crusher Spares & Mechanical Components
+- Industrial Rollers, High-Temp Greases & Lubricants
 
-AUTHORIZED DISTRIBUTORS FOR
+AUTHORIZED DISTRIBUTORS & STOCKISTS FOR
 EVO Bearings | Renold | Max Spares | KYK Japan | Toyo Power | JK Fenner
 
-Given Lal Baba Seamless Tubes' manufacturing operations, dependable bearing and component supply is likely a core, recurring need — I'd welcome the opportunity to support that.
+Given {Company}'s manufacturing operations, dependable bearing and mechanical component supply is likely a core, recurring requirement for your maintenance and production lines — I would welcome the opportunity to support {Company} with competitive pricing and rapid dispatch.
 
-INTRODUCTORY OFFER
-As a welcome gesture, we're offering ₹1,000 cashback on your first order with us.
+INTRODUCTORY OFFER FOR NEW PARTNERS
+As a welcome gesture for {Company}, we are offering ₹1,000 cashback on your first trial order with us.
 
-Happy to set up a quick call at your convenience.
+Please let me know if we can share our complete product catalog or schedule a brief introductory call.
 
 Warm regards,
 Lakshya Raj Devguru Jaiswal
 India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
 +91 9831356591 | +91 9088363391 | +91 9038666911
 Website: https://evomachinery.in/""",
-        height=380,
-        key="single_body",
+      height=400,
+      key="single_body",
+  )
+
+  with st.expander("📎 Attachments & Media Links", expanded=False):
+    gdrive_link_1 = st.text_input(
+        "Drive Catalog Link",
+        placeholder="https://drive.google.com/...",
+        key="gd1",
+    )
+    catalog_link_1 = st.text_input(
+        "Website/Spec Link",
+        placeholder="https://evomachinery.in/...",
+        key="cat1",
+    )
+    video_link_1 = st.text_input(
+        "Product Video Link", placeholder="https://youtube.com/...", key="vlink1"
+    )
+    video_attachments = st.file_uploader(
+        "Attach Videos",
+        type=["mp4", "mov", "avi"],
+        accept_multiple_files=True,
+        key="vid_att1",
+    )
+    st.markdown("---")
+    attachments = st.file_uploader(
+        "Attach Documents / Catalogs (PDF/XLS)",
+        accept_multiple_files=True,
+        key="att1",
     )
 
-    with st.expander("📎 Attachments & Media Links", expanded=False):
-      gdrive_link_1 = st.text_input(
-          "Drive Link", placeholder="https://drive.google.com/...", key="gd1"
-      )
-      catalog_link_1 = st.text_input(
-          "Resource Link", placeholder="https://yourwebsite.com/...", key="cat1"
-      )
-      video_link_1 = st.text_input(
-          "Video Link", placeholder="https://youtube.com/...", key="vlink1"
-      )
-      video_attachments = st.file_uploader(
-          "Attach Videos",
-          type=["mp4", "mov", "avi"],
-          accept_multiple_files=True,
-          key="vid_att1",
-      )
-      st.markdown("---")
-      attachments = st.file_uploader(
-          "Attach Documents/PDFs", accept_multiple_files=True, key="att1"
-      )
+  st.header("3. Campaign Controls")
+  delay_range = st.slider(
+      "⏱️ Delay Between Emails (Seconds):",
+      min_value=5,
+      max_value=300,
+      value=(30, 60),
+      step=1,
+      key="delay1",
+  )
 
-    st.header("3. Campaign Controls")
-    delay_range = st.slider(
-        "⏱️ Delay Between Emails (Seconds):",
-        min_value=5,
-        max_value=300,
-        value=(30, 60),
-        step=1,
-        key="delay1",
+  col_btn1, col_btn2 = st.columns(2)
+  with col_btn1:
+    start_clicked = st.button(
+        "🚀 Start Campaign",
+        disabled=st.session_state.is_sending,
+        key="start1",
     )
+  with col_btn2:
+    stop_clicked = st.button("🛑 Stop Campaign", key="stop1")
 
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-      start_clicked = st.button(
-          "🚀 Start Campaign",
-          disabled=st.session_state.is_sending,
-          key="start1",
-      )
-    with col_btn2:
-      stop_clicked = st.button("🛑 Stop Campaign", key="stop1")
+  if stop_clicked:
+    st.session_state.is_sending = False
+    st.warning("Campaign halted.")
 
-    if stop_clicked:
-      st.session_state.is_sending = False
-      st.warning("Campaign halted.")
+  if start_clicked:
+    if not uploaded_file:
+      st.error("Please upload an Excel or CSV file first.")
+    elif not sender_email or not sender_password:
+      st.error("Please enter Sender Email and App Password in the sidebar.")
+    elif df_clean.empty:
+      st.error("No valid recipient records found.")
+    else:
+      st.session_state.is_sending = True
+      server = None
+      try:
+        if use_ssl:
+          server = smtplib.SMTP_SSL(smtp_server, int(smtp_port), timeout=120)
+        else:
+          server = smtplib.SMTP(smtp_server, int(smtp_port), timeout=120)
+          server.starttls()
 
-    if start_clicked:
-      if not sender_email or not sender_password:
-        st.error("Please enter Sender Email and App Password in the sidebar.")
-      elif df_clean.empty:
-        st.error("No valid recipient records found.")
-      else:
-        st.session_state.is_sending = True
-        server = None
-        try:
-          if use_ssl:
-            server = smtplib.SMTP_SSL(smtp_server, int(smtp_port), timeout=120)
-          else:
-            server = smtplib.SMTP(smtp_server, int(smtp_port), timeout=120)
-            server.starttls()
+        server.login(sender_email, sender_password)
 
-          server.login(sender_email, sender_password)
+        progress = st.progress(0)
+        status_msg = st.empty()
+        total = len(df_clean)
+        min_sec, max_sec = delay_range
 
-          progress = st.progress(0)
-          status_msg = st.empty()
-          total = len(df_clean)
-          min_sec, max_sec = delay_range
+        for i, (_, row) in enumerate(df_clean.iterrows()):
+          if not st.session_state.is_sending:
+            status_msg.warning("Interrupted by user.")
+            break
 
-          for i, (_, row) in enumerate(df_clean.iterrows()):
-            if not st.session_state.is_sending:
-              status_msg.warning("Interrupted.")
-              break
+          row_dict = row.to_dict()
+          row_dict["sender_name"] = sender_name
 
-            row_dict = row.to_dict()
-            row_dict["sender_name"] = sender_name
-            row_dict["Name"] = (
-                str(row_dict.get("Name", "")).strip() or "Valued Partner"
-            )
-            row_dict["University"] = (
-                str(row_dict.get("University", "")).strip()
-                or "your institution"
-            )
-            row_dict["Department"] = (
-                str(row_dict.get("Department", "")).strip() or "your department"
-            )
+          recipient_email = str(row_dict.get("Email", "")).strip()
+          recipient_name = (
+              str(row_dict.get("Name", "")).strip() or "Valued Partner"
+          )
+          recipient_comp = (
+              str(row_dict.get("Company", "")).strip() or "your company"
+          )
+          recipient_desig = (
+              str(row_dict.get("Designation", "")).strip()
+              or "Purchase Manager"
+          )
+          recipient_dept = (
+              str(row_dict.get("Department", "")).strip()
+              or "Procurement & Maintenance"
+          )
+          recipient_city = (
+              str(row_dict.get("City", "")).strip() or "your area"
+          )
 
-            recipient_email = str(row_dict.get("Email", "")).strip()
-            recipient_name = row_dict["Name"]
-            recipient_univ = row_dict["University"]
-            recipient_dept = row_dict["Department"]
+          rendered_body = render_template(body_val, row_dict)
+          rendered_subject = render_template(sub_val, row_dict)
 
-            rendered_body = render_template(body_val, row_dict)
-            rendered_subject = render_template(sub_val, row_dict)
+          html_body = build_html_body(
+              rendered_body,
+              [gdrive_link_1],
+              [catalog_link_1],
+              [video_link_1],
+              [v.name for v in video_attachments]
+              if video_attachments
+              else [],
+          )
 
-            html_body = build_html_body(
-                rendered_body,
-                [gdrive_link_1],
-                [catalog_link_1],
-                [video_link_1],
-                [v.name for v in video_attachments]
-                if video_attachments
-                else [],
-            )
+          msg = MIMEMultipart("mixed")
+          msg["From"] = f"{sender_name} <{sender_email}>"
+          msg["To"] = recipient_email
+          if cc_email.strip():
+            msg["Cc"] = cc_email.strip()
 
-            msg = MIMEMultipart("mixed")
-            msg["From"] = f"{sender_name} <{sender_email}>"
-            msg["To"] = recipient_email
-            if cc_email.strip():
-              msg["Cc"] = cc_email.strip()
+          msg["Subject"] = Header(rendered_subject, "utf-8").encode()
 
-            # Fix: UTF-8 Subject Header Encoding
-            msg["Subject"] = Header(rendered_subject, "utf-8").encode()
+          msg_alt = MIMEMultipart("alternative")
+          msg_alt.attach(MIMEText(html_body, "html", "utf-8"))
+          msg.attach(msg_alt)
 
-            msg_alt = MIMEMultipart("alternative")
-            # Fix: UTF-8 Body Encoding for Emoticons & Unicode
-            msg_alt.attach(MIMEText(html_body, "html", "utf-8"))
-            msg.attach(msg_alt)
+          # Attach Documents
+          if attachments:
+            for att in attachments:
+              part = MIMEBase("application", "octet-stream")
+              part.set_payload(att.getvalue())
+              encoders.encode_base64(part)
+              part.add_header(
+                  "Content-Disposition", f'attachment; filename="{att.name}"'
+              )
+              msg.attach(part)
 
-            # Attach Documents
-            if attachments:
-              for att in attachments:
-                part = MIMEBase("application", "octet-stream")
-                part.set_payload(att.getvalue())
-                encoders.encode_base64(part)
-                part.add_header(
-                    "Content-Disposition",
-                    f'attachment; filename="{att.name}"',
-                )
-                msg.attach(part)
+          # Attach Videos
+          if video_attachments:
+            for vid in video_attachments:
+              vid_part = MIMEBase("video", "octet-stream")
+              vid_part.set_payload(vid.getvalue())
+              encoders.encode_base64(vid_part)
+              vid_part.add_header(
+                  "Content-Disposition", f'attachment; filename="{vid.name}"'
+              )
+              msg.attach(vid_part)
 
-            # Attach Videos
-            if video_attachments:
-              for vid in video_attachments:
-                vid_part = MIMEBase("video", "octet-stream")
-                vid_part.set_payload(vid.getvalue())
-                encoders.encode_base64(vid_part)
-                vid_part.add_header(
-                    "Content-Disposition",
-                    f'attachment; filename="{vid.name}"',
-                )
-                msg.attach(vid_part)
+          recipients_list = [recipient_email]
+          if cc_email.strip():
+            recipients_list.append(cc_email.strip())
 
-            recipients_list = [recipient_email]
-            if cc_email.strip():
-              recipients_list.append(cc_email.strip())
+          server.sendmail(sender_email, recipients_list, msg.as_string())
+          log_initial_email(
+              recipient_name,
+              recipient_email,
+              recipient_comp,
+              recipient_desig,
+              recipient_dept,
+              recipient_city,
+          )
 
-            server.sendmail(sender_email, recipients_list, msg.as_string())
-            log_initial_email(
-                recipient_name,
-                recipient_email,
-                recipient_univ,
-                recipient_dept,
-            )
+          actual_delay = round(random.uniform(min_sec, max_sec), 1)
+          status_msg.text(
+              f"[{i+1}/{total}] Sent to: {recipient_email} ({recipient_comp})"
+              f' | Subject: "{rendered_subject}" (Waiting {actual_delay}s)'
+          )
+          progress.progress((i + 1) / total)
+          time.sleep(actual_delay)
 
-            actual_delay = round(random.uniform(min_sec, max_sec), 1)
-            status_msg.text(
-                f"[{i+1}/{total}] Sent to: {recipient_email} | Subject:"
-                f' "{rendered_subject}" (Waiting {actual_delay}s)'
-            )
-            progress.progress((i + 1) / total)
-            time.sleep(actual_delay)
+        if st.session_state.is_sending:
+          st.success("🎉 Industrial outreach campaign completed successfully!")
+        st.session_state.is_sending = False
 
-          if st.session_state.is_sending:
-            st.success("🎉 Campaign completed successfully!")
-          st.session_state.is_sending = False
-
-        except Exception as e:
-          st.error(f"Error during sending: {e}")
-          st.session_state.is_sending = False
-        finally:
-          if server:
-            try:
-              server.quit()
-            except Exception:
-              pass
+      except Exception as e:
+        st.error(f"Error during sending: {e}")
+        st.session_state.is_sending = False
+      finally:
+        if server:
+          try:
+            server.quit()
+          except Exception:
+            pass
 
 # --- TAB 2: FOLLOW-UP MANAGER ---
 with tab2:
-  st.header("⏰ Auto Follow-Up Engine")
+  st.header("⏰ Industrial Auto Follow-Up Engine")
   col1, col2 = st.columns(2)
   with col1:
     days_thresh = st.number_input(
@@ -663,17 +755,24 @@ with tab2:
   if not candidates.empty:
     fu_subject = st.text_input(
         "Follow-Up Subject Line",
-        value="Following up on our proposal for {University}",
+        value="Following up: Bearings & industrial supply partnership",
         key="main_fs1",
     )
     fu_body = st.text_area(
         "Follow-Up Body Template",
-        value=(
-            "Hi {Name},\n\nI am following up on my previous message regarding"
-            " Alpha ParadoxQC for {University}. Let me know if you would be open"
-            " to connecting.\n\nBest regards,\n{sender_name}"
-        ),
-        height=150,
+        value="""Dear {Name},
+
+I am following up on my previous message regarding industrial bearing and component supply for {Company}. 
+
+We carry ready stock for EVO, Renold, Max Spares, KYK Japan, Toyo Power, and JK Fenner products.
+
+If your procurement or maintenance team is currently reviewing bearing vendor lists or requires pricing for an upcoming RFQ/purchase order, please let me know. Happy to share our rate card or schedule a 5-minute call.
+
+Warm regards,
+{sender_name}
+India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
++91 9831356591 | +91 9088363391""",
+        height=200,
         key="body2",
     )
 
@@ -710,15 +809,15 @@ with tab2:
               or str(row_dict.get("Name", "")).strip()
               or "Valued Partner"
           )
-          row_dict["University"] = (
-              str(row_dict.get("university", "")).strip()
-              or str(row_dict.get("University", "")).strip()
-              or "your institution"
+          row_dict["Company"] = (
+              str(row_dict.get("company", "")).strip()
+              or str(row_dict.get("Company", "")).strip()
+              or "your company"
           )
-          row_dict["Department"] = (
-              str(row_dict.get("department", "")).strip()
-              or str(row_dict.get("Department", "")).strip()
-              or "your department"
+          row_dict["City"] = (
+              str(row_dict.get("city", "")).strip()
+              or str(row_dict.get("City", "")).strip()
+              or "your area"
           )
 
           rendered_fu_body = render_template(fu_body, row_dict)
@@ -764,10 +863,13 @@ with tab2:
 
 # --- TAB 3: DATABASE LOG ---
 with tab3:
-  st.header("📊 Campaign History & Records")
+  st.header("📊 Campaign History & Database Logs")
   conn = sqlite3.connect("campaigns.db")
   all_logs = pd.read_sql_query(
-      "SELECT * FROM sent_emails ORDER BY id DESC", conn
+      "SELECT id, name, company, designation, department, city, email,"
+      " initial_sent_date, status, followup_sent_date FROM sent_emails ORDER"
+      " BY id DESC",
+      conn,
   )
   conn.close()
   st.dataframe(all_logs)
