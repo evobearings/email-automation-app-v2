@@ -431,7 +431,7 @@ sender_name = st.sidebar.text_input(
     "Sender Display Name",
     value="Lakshya Raj Devguru Jaiswal | EVO Bearings & Mill Stores",
 )
-sender_email = st.sidebar.text_input("Sender Email", value="evoalpha30@gmail.com")
+sender_email = st.sidebar.text_input("Sender Email", value="evobearings@gmail.com")
 sender_password = st.sidebar.text_input(
     "App Password (16-char)", type="password"
 )
