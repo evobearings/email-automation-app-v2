@@ -183,7 +183,6 @@ EMAIL_REGEX = re.compile(
 
 
 def load_and_parse_file(uploaded_file):
-  # Rewind file pointer to avoid Streamlit rerun crashes
   uploaded_file.seek(0)
   if uploaded_file.name.endswith(".csv"):
     try:
@@ -197,7 +196,7 @@ def load_and_parse_file(uploaded_file):
   df = df.fillna("").astype(str)
   df.columns = [str(col).strip() for col in df.columns]
 
-  # 1. Identify Email column FIRST to avoid header collisions
+  # 1. Identify Email column FIRST
   email_col = None
   for col in df.columns:
     if "email" in col.lower() or "mail" in col.lower():
@@ -215,7 +214,7 @@ def load_and_parse_file(uploaded_file):
   elif "Email" not in df.columns:
     df["Email"] = ""
 
-  # 2. Smart Column Mapping for Industrial & Commercial Datasets
+  # 2. Smart Column Mapping
   mapping_rules = {
       "Name": [
           "name",
@@ -265,7 +264,7 @@ def load_and_parse_file(uploaded_file):
         df.rename(columns={col: target_tag}, inplace=True)
         break
 
-  # Set defaults for key tags if missing from source file
+  # Set defaults for core tags
   if "Name" not in df.columns:
     df["Name"] = "Valued Partner"
   if "Company" not in df.columns:
@@ -275,9 +274,9 @@ def load_and_parse_file(uploaded_file):
   if "Department" not in df.columns:
     df["Department"] = "Procurement & Maintenance"
   if "City" not in df.columns:
-    df["City"] = "your region"
+    df["City"] = "your area"
 
-  # Deduplicate column names to prevent Arrow/Streamlit crashes
+  # Deduplicate column names
   cols = pd.Series(df.columns)
   for dup in cols[cols.duplicated()].unique():
     cols[cols == dup] = [
@@ -285,11 +284,11 @@ def load_and_parse_file(uploaded_file):
     ]
   df.columns = cols
 
-  # Clean emails & remove invalids
+  # Filter valid emails
   df["Email"] = df["Email"].str.strip().str.lower()
   df = df[df["Email"].str.contains("@", na=False)].copy()
 
-  # Apply 24h safeguard
+  # 24-hour safeguard
   recent_emails = get_emails_sent_in_last_24h()
   initial_len = len(df)
   df = df[~df["Email"].isin(recent_emails)].copy()
@@ -299,22 +298,27 @@ def load_and_parse_file(uploaded_file):
 
 
 def render_template(template_str: str, row_dict: dict) -> str:
+  """Case-insensitive tag engine supports {tag}, {Tag}, and {TAG}."""
   rendered = template_str
   for key, value in row_dict.items():
-    placeholder = f"{{{key}}}"
-    if placeholder in rendered:
-      val_str = str(value).strip()
-      # Smart fallbacks for empty text cells
-      if not val_str:
-        if key.lower() == "name":
-          val_str = "Valued Partner"
-        elif key.lower() == "company":
-          val_str = "your company"
-        elif key.lower() in ["city", "location"]:
-          val_str = "your area"
-        else:
-          val_str = ""
-      rendered = rendered.replace(placeholder, val_str)
+    val_str = str(value).strip() if value is not None else ""
+
+    if not val_str:
+      k_lower = key.lower()
+      if k_lower == "name":
+        val_str = "Valued Partner"
+      elif k_lower == "company":
+        val_str = "your company"
+      elif k_lower in ["city", "location"]:
+        val_str = "your area"
+      else:
+        val_str = ""
+
+    rendered = rendered.replace(f"{{{key}}}", val_str)
+    rendered = rendered.replace(f"{{{key.lower()}}}", val_str)
+    rendered = rendered.replace(f"{{{key.capitalize()}}}", val_str)
+    rendered = rendered.replace(f"{{{key.upper()}}}", val_str)
+
   return rendered
 
 
@@ -362,53 +366,27 @@ def check_inbox_for_replies(
 
 
 # ==========================================
-# 4. HTML EMAIL BUILDER
+# 4. DYNAMIC HTML EMAIL BUILDER
 # ==========================================
 
 
-def build_html_body(
-    text_content,
-    gdrive_links=None,
-    catalog_links=None,
-    video_links=None,
-    video_names=None,
-):
+def build_html_body(text_content, custom_links=None, video_names=None):
+  """Builds clean HTML email with dynamic custom-named links and media attachments."""
   formatted_text = text_content.replace("\n", "<br>")
   links_html = ""
   highlight_style = "font-weight: bold; background-color: #fffacd; padding: 3px 6px; border-radius: 4px; text-decoration: underline;"
 
-  if gdrive_links:
-    drive_items = "".join([
-        f'<li style="margin-bottom: 8px;"><a href="{l.strip()}" target="_blank"'
-        f' style="color: #1a73e8; {highlight_style}">Product Catalog / Drive'
-        f' Link #{i}</a></li>'
-        for i, l in enumerate(gdrive_links, 1)
-        if l and l.strip()
+  # Process Unlimited Custom Links
+  if custom_links:
+    link_items = "".join([
+        f'<li style="margin-bottom: 8px;"><a href="{l["url"].strip()}"'
+        ' target="_blank" style="color: #1a73e8;'
+        f' {highlight_style}">{l["label"].strip() or "Resource Link"}</a></li>'
+        for l in custom_links
+        if l.get("url") and l["url"].strip()
     ])
-    if drive_items:
-      links_html += f'<div style="margin-top: 15px;">📁 <b>Product Catalogs & Docs:</b><ul style="margin: 5px 0 0 20px; padding: 0;">{drive_items}</ul></div>'
-
-  if catalog_links:
-    cat_items = "".join([
-        f'<li style="margin-bottom: 8px;"><a href="{l.strip()}" target="_blank"'
-        f' style="color: #008080; {highlight_style}">Website / Technical'
-        f' Specs #{i}</a></li>'
-        for i, l in enumerate(catalog_links, 1)
-        if l and l.strip()
-    ])
-    if cat_items:
-      links_html += f'<div style="margin-top: 15px;">📖 <b>Resource & Spec Links:</b><ul style="margin: 5px 0 0 20px; padding: 0;">{cat_items}</ul></div>'
-
-  if video_links:
-    vid_items = "".join([
-        f'<li style="margin-bottom: 8px;"><a href="{l.strip()}" target="_blank"'
-        f' style="color: #d9534f; {highlight_style}">Product Demo Video'
-        f' #{i}</a></li>'
-        for i, l in enumerate(video_links, 1)
-        if l and l.strip()
-    ])
-    if vid_items:
-      links_html += f'<div style="margin-top: 15px;">🎥 <b>Video Links:</b><ul style="margin: 5px 0 0 20px; padding: 0;">{vid_items}</ul></div>'
+    if link_items:
+      links_html += f'<div style="margin-top: 15px;">🔗 <b>Important Links & Resources:</b><ul style="margin: 5px 0 0 20px; padding: 0;">{link_items}</ul></div>'
 
   if video_names:
     v_items = "".join([
@@ -436,10 +414,16 @@ st.set_page_config(
     page_title="Industrial Outreach Portal", page_icon="⚙️", layout="wide"
 )
 
-st.title("⚙️ Industrial & Commercial Outreach Portal")
+st.title("✉️ Outreach & CRM Portal")
 
 if "is_sending" not in st.session_state:
   st.session_state.is_sending = False
+
+# Session State for Dynamic Links
+if "custom_links" not in st.session_state:
+  st.session_state.custom_links = [
+      {"label": "Website & Product Catalog", "url": "https://evomachinery.in/"}
+  ]
 
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("⚙️ Sender Credentials")
@@ -499,12 +483,11 @@ with tab1:
 
   st.header("2. Email Pitch Template")
 
-  # Mandatory Subject line set to user specification
   sub_val = st.text_input(
       "Subject Line",
       value="Bearings & industrial supply partnership",
       key="single_sub",
-      help="Required Subject Line. You can append placeholders like: Bearings & industrial supply partnership - {Company}",
+      help="Subject Line. You can append placeholders like: Bearings & industrial supply partnership - {Company}",
   )
 
   body_val = st.text_area(
@@ -535,31 +518,56 @@ Lakshya Raj Devguru Jaiswal
 India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
 +91 9831356591 | +91 9088363391 | +91 9038666911
 Website: https://evomachinery.in/""",
-      height=400,
+      height=380,
       key="single_body",
   )
 
-  with st.expander("📎 Attachments & Media Links", expanded=False):
-    gdrive_link_1 = st.text_input(
-        "Drive Catalog Link",
-        placeholder="https://drive.google.com/...",
-        key="gd1",
+  with st.expander("📎 Dynamic Links & File Attachments", expanded=False):
+    st.markdown("##### 🔗 Custom Hyperlinks")
+    st.caption(
+        "Customize the link name and add as many links as you want using the ➕"
+        " button."
     )
-    catalog_link_1 = st.text_input(
-        "Website/Spec Link",
-        placeholder="https://evomachinery.in/...",
-        key="cat1",
-    )
-    video_link_1 = st.text_input(
-        "Product Video Link", placeholder="https://youtube.com/...", key="vlink1"
-    )
+
+    # Dynamic Link Generator UI
+    updated_links = []
+    for idx, link_item in enumerate(st.session_state.custom_links):
+      col_label, col_url, col_del = st.columns([2.5, 4, 0.6])
+      with col_label:
+        lbl = st.text_input(
+            f"Link Name #{idx+1}",
+            value=link_item["label"],
+            key=f"lnk_lbl_{idx}",
+            placeholder="e.g. Product Catalog PDF",
+        )
+      with col_url:
+        url = st.text_input(
+            f"URL #{idx+1}",
+            value=link_item["url"],
+            key=f"lnk_url_{idx}",
+            placeholder="https://...",
+        )
+      with col_del:
+        st.write("")
+        st.write("")
+        if st.button("❌", key=f"del_lnk_{idx}"):
+          st.session_state.custom_links.pop(idx)
+          st.rerun()
+      updated_links.append({"label": lbl, "url": url})
+
+    st.session_state.custom_links = updated_links
+
+    if st.button("➕ Add Link"):
+      st.session_state.custom_links.append({"label": "", "url": ""})
+      st.rerun()
+
+    st.markdown("---")
     video_attachments = st.file_uploader(
         "Attach Videos",
         type=["mp4", "mov", "avi"],
         accept_multiple_files=True,
         key="vid_att1",
     )
-    st.markdown("---")
     attachments = st.file_uploader(
         "Attach Documents / Catalogs (PDF/XLS)",
         accept_multiple_files=True,
@@ -644,11 +652,10 @@ Website: https://evomachinery.in/""",
           rendered_body = render_template(body_val, row_dict)
           rendered_subject = render_template(sub_val, row_dict)
 
+          # Build HTML body with custom links list
           html_body = build_html_body(
               rendered_body,
-              [gdrive_link_1],
-              [catalog_link_1],
-              [video_link_1],
+              st.session_state.custom_links,
               [v.name for v in video_attachments]
               if video_attachments
               else [],
@@ -804,26 +811,13 @@ India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
 
           row_dict = row.to_dict()
           row_dict["sender_name"] = sender_name
-          row_dict["Name"] = (
-              str(row_dict.get("name", "")).strip()
-              or str(row_dict.get("Name", "")).strip()
-              or "Valued Partner"
-          )
-          row_dict["Company"] = (
-              str(row_dict.get("company", "")).strip()
-              or str(row_dict.get("Company", "")).strip()
-              or "your company"
-          )
-          row_dict["City"] = (
-              str(row_dict.get("city", "")).strip()
-              or str(row_dict.get("City", "")).strip()
-              or "your area"
-          )
 
           rendered_fu_body = render_template(fu_body, row_dict)
           rendered_fu_subject = render_template(fu_subject, row_dict)
 
-          html_b = build_html_body(rendered_fu_body)
+          html_b = build_html_body(
+              rendered_fu_body, custom_links=st.session_state.custom_links
+          )
 
           msg = MIMEMultipart("alternative")
           msg["From"] = f"{sender_name} <{sender_email}>"
