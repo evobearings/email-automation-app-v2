@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from email import encoders
+from email.header import Header
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -68,7 +69,7 @@ def log_initial_email(
           name,
           university,
           department,
-          email,
+          email.lower(),
           now,
           name,
           university,
@@ -88,7 +89,7 @@ def log_followup_email(email: str):
       """
         UPDATE sent_emails
         SET status = 'Follow-up Sent', followup_sent_date = ?
-        WHERE email = ?
+        WHERE LOWER(email) = LOWER(?)
     """,
       (now, email),
   )
@@ -161,33 +162,21 @@ EMAIL_REGEX = re.compile(
 
 
 def load_and_parse_file(uploaded_file):
+  # Rewind file pointer to avoid Streamlit rerun crashes
+  uploaded_file.seek(0)
   if uploaded_file.name.endswith(".csv"):
-    df = pd.read_csv(uploaded_file)
+    try:
+      df = pd.read_csv(uploaded_file)
+    except Exception:
+      uploaded_file.seek(0)
+      df = pd.read_csv(uploaded_file, encoding="latin1")
   else:
     df = pd.read_excel(uploaded_file)
 
   df = df.fillna("").astype(str)
   df.columns = [str(col).strip() for col in df.columns]
 
-  # Map common column name aliases
-  for col in df.columns:
-    c_lower = col.lower()
-    if any(k in c_lower for k in ["name", "contact", "person", "recipient"]):
-      if col != "Email":
-        df.rename(columns={col: "Name"}, inplace=True)
-    elif any(k in c_lower for k in ["university", "college", "institution"]):
-      df.rename(columns={col: "University"}, inplace=True)
-    elif any(k in c_lower for k in ["dept", "department"]):
-      df.rename(columns={col: "Department"}, inplace=True)
-
-  if "Name" not in df.columns:
-    df["Name"] = "Valued Partner"
-  if "University" not in df.columns:
-    df["University"] = "your institution"
-  if "Department" not in df.columns:
-    df["Department"] = "your department"
-
-  # Identify Email column dynamically
+  # 1. Identify Email column FIRST to prevent naming conflicts
   email_col = None
   for col in df.columns:
     if "email" in col.lower() or "mail" in col.lower():
@@ -204,6 +193,25 @@ def load_and_parse_file(uploaded_file):
     df.rename(columns={email_col: "Email"}, inplace=True)
   elif "Email" not in df.columns:
     df["Email"] = ""
+
+  # 2. Map remaining columns without touching Email
+  for col in df.columns:
+    if col == "Email":
+      continue
+    c_lower = col.lower()
+    if any(k in c_lower for k in ["name", "contact", "person"]):
+      df.rename(columns={col: "Name"}, inplace=True)
+    elif any(k in c_lower for k in ["university", "college", "institution"]):
+      df.rename(columns={col: "University"}, inplace=True)
+    elif any(k in c_lower for k in ["dept", "department"]):
+      df.rename(columns={col: "Department"}, inplace=True)
+
+  if "Name" not in df.columns:
+    df["Name"] = "Valued Partner"
+  if "University" not in df.columns:
+    df["University"] = "your institution"
+  if "Department" not in df.columns:
+    df["Department"] = "your department"
 
   # Deduplicate column names to prevent Arrow/Streamlit crashes
   cols = pd.Series(df.columns)
@@ -252,12 +260,24 @@ def check_inbox_for_replies(
       since_date = (datetime.now() - timedelta(days=60)).strftime("%d-%b-%Y")
       messages = client.search(["SINCE", since_date])
 
-      for msg_id, data in client.fetch(messages, ["ENVELOPE"]).items():
-        envelope = data[b"ENVELOPE"]
-        if envelope.from_:
+      if not messages:
+        return [], None
+
+      fetch_data = client.fetch(messages, ["ENVELOPE"])
+      for msg_id, data in fetch_data.items():
+        envelope = data.get(b"ENVELOPE") or data.get("ENVELOPE")
+        if envelope and envelope.from_:
           for addr in envelope.from_:
-            mailbox = addr.mailbox.decode() if addr.mailbox else ""
-            host = addr.host.decode() if addr.host else ""
+            mailbox = (
+                addr.mailbox.decode("utf-8", errors="ignore")
+                if isinstance(addr.mailbox, bytes)
+                else (addr.mailbox or "")
+            )
+            host = (
+                addr.host.decode("utf-8", errors="ignore")
+                if isinstance(addr.host, bytes)
+                else (addr.host or "")
+            )
             if mailbox and host:
               replied_senders.add(f"{mailbox}@{host}".lower())
 
@@ -359,8 +379,6 @@ cc_email = st.sidebar.text_input(
 )
 
 smtp_server = st.sidebar.text_input("SMTP Server", value="smtp.gmail.com")
-
-# Set default port/SSL for Render Cloud compatibility (Port 587 recommended)
 smtp_port = st.sidebar.number_input("SMTP Port", value=587)
 use_ssl = st.sidebar.checkbox(
     "Use SSL Connection (Port 465)",
@@ -411,30 +429,30 @@ with tab1:
         "Email Body",
         value="""Dear {Name},
 
-I hope this email finds you well.
+I'm Lakshya Raj Devguru Jaiswal, and I'd like to introduce India Bearings & Mill Stores and EVO Bearings and Machineries Pvt. Ltd. — reliable industrial suppliers serving tube and steel manufacturers across Kolkata.
 
-As quantum technologies move from theoretical physics into mainstream software engineering, biotechnology, and chemistry, leading global universities are racing to prepare their students for the quantum workforce. However, setting up physical labs or command-line coding kits often introduces major friction, licensing costs, and steep learning curves.
+WHAT WE SUPPLY
+- Bearings (All Types)
+- V-Belts, Chains & Sprockets
+- Plummer Blocks, UC Pillow Blocks, Adaptor Sleeves
+- Crusher Spares & Accessories
+- Rollers, Grease & Lubricants
 
-We would like to introduce Alpha ParadoxQC—the world’s first integrated, browser-based Quantum Computing Education and Research Platform.
+AUTHORIZED DISTRIBUTORS FOR
+EVO Bearings | Renold | Max Spares | KYK Japan | Toyo Power | JK Fenner
 
-Our platform completely eliminates setup hurdles by providing:
-• Interactive Quantum Circuit Builder: Visual multi-qubit design, local simulations, and direct QPU execution to real quantum machines (IonQ, Rigetti, IQM).
-• Quantum Chemistry (VQE) Simulator: Visualizing ground-state energies for 30+ molecules and a Custom Molecule Inventor for student research.
-• Pharma & Drug Discovery Module: Live visual docking simulators (like COX-2 COX inhibitors), automated ADMET profiling, and Lipinski Rule-of-Five checks.
+Given Lal Baba Seamless Tubes' manufacturing operations, dependable bearing and component supply is likely a core, recurring need — I'd welcome the opportunity to support that.
 
-Our Proposal to {University}:
-We are currently selecting forward-thinking Indian universities to receive a Free, Custom Live Demonstration of the platform for your science and engineering faculty in {Department}. Following this interactive demo, we can set up a structured pilot program, paving the way for an Annual Rate Contract (ARC) to equip your entire student body with personal, cloud-based quantum sandboxes.
+INTRODUCTORY OFFER
+As a welcome gesture, we're offering ₹1,000 cashback on your first order with us.
 
-EVO Network Bharat Private Limited (an initiative by Lakshya Raj Devguru Jaiswal) is the official implementation and marketing partner for this academic roll-out.
+Happy to set up a quick call at your convenience.
 
-We would love to discuss how we can deploy this trial for your departments and explore a long-term partnership. Please feel free to reach back directly at the coordinates listed below.
-
-Sincerely,
-
-EVO Network Bharat Private Limited 
-Phone: +91 6293755931 / +91 9831356591
-Email: evoalpha30@gmail.com
-Website: www.alphaparadoxqc.com""",
+Warm regards,
+Lakshya Raj Devguru Jaiswal
+India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
++91 9831356591 | +91 9088363391 | +91 9038666911
+Website: https://evomachinery.in/""",
         height=380,
         key="single_body",
     )
@@ -491,6 +509,7 @@ Website: www.alphaparadoxqc.com""",
         st.error("No valid recipient records found.")
       else:
         st.session_state.is_sending = True
+        server = None
         try:
           if use_ssl:
             server = smtplib.SMTP_SSL(smtp_server, int(smtp_port), timeout=120)
@@ -512,17 +531,21 @@ Website: www.alphaparadoxqc.com""",
 
             row_dict = row.to_dict()
             row_dict["sender_name"] = sender_name
+            row_dict["Name"] = (
+                str(row_dict.get("Name", "")).strip() or "Valued Partner"
+            )
+            row_dict["University"] = (
+                str(row_dict.get("University", "")).strip()
+                or "your institution"
+            )
+            row_dict["Department"] = (
+                str(row_dict.get("Department", "")).strip() or "your department"
+            )
 
             recipient_email = str(row_dict.get("Email", "")).strip()
-            recipient_name = str(
-                row_dict.get("Name", "Valued Partner")
-            ).strip()
-            recipient_univ = str(
-                row_dict.get("University", "your institution")
-            ).strip()
-            recipient_dept = str(
-                row_dict.get("Department", "your department")
-            ).strip()
+            recipient_name = row_dict["Name"]
+            recipient_univ = row_dict["University"]
+            recipient_dept = row_dict["Department"]
 
             rendered_body = render_template(body_val, row_dict)
             rendered_subject = render_template(sub_val, row_dict)
@@ -542,10 +565,13 @@ Website: www.alphaparadoxqc.com""",
             msg["To"] = recipient_email
             if cc_email.strip():
               msg["Cc"] = cc_email.strip()
-            msg["Subject"] = rendered_subject
+
+            # Fix: UTF-8 Subject Header Encoding
+            msg["Subject"] = Header(rendered_subject, "utf-8").encode()
 
             msg_alt = MIMEMultipart("alternative")
-            msg_alt.attach(MIMEText(html_body, "html"))
+            # Fix: UTF-8 Body Encoding for Emoticons & Unicode
+            msg_alt.attach(MIMEText(html_body, "html", "utf-8"))
             msg.attach(msg_alt)
 
             # Attach Documents
@@ -592,7 +618,6 @@ Website: www.alphaparadoxqc.com""",
             progress.progress((i + 1) / total)
             time.sleep(actual_delay)
 
-          server.quit()
           if st.session_state.is_sending:
             st.success("🎉 Campaign completed successfully!")
           st.session_state.is_sending = False
@@ -600,6 +625,12 @@ Website: www.alphaparadoxqc.com""",
         except Exception as e:
           st.error(f"Error during sending: {e}")
           st.session_state.is_sending = False
+        finally:
+          if server:
+            try:
+              server.quit()
+            except Exception:
+              pass
 
 # --- TAB 2: FOLLOW-UP MANAGER ---
 with tab2:
@@ -640,7 +671,7 @@ with tab2:
         value=(
             "Hi {Name},\n\nI am following up on my previous message regarding"
             " Alpha ParadoxQC for {University}. Let me know if you would be open"
-            " to connecting.\n\nBest regards,\nEVO Network Bharat"
+            " to connecting.\n\nBest regards,\n{sender_name}"
         ),
         height=150,
         key="body2",
@@ -655,6 +686,7 @@ with tab2:
     )
 
     if st.button("🚀 Start Follow-Ups", key="start2"):
+      server = None
       try:
         if use_ssl:
           server = smtplib.SMTP_SSL(smtp_server, int(smtp_port), timeout=120)
@@ -663,15 +695,31 @@ with tab2:
           server.starttls()
 
         server.login(sender_email, sender_password)
+
+        progress_fu = st.progress(0)
+        status_fu = st.empty()
+        total_fu = len(candidates)
+
         for i, (_, row) in enumerate(candidates.iterrows()):
-          rec = row["email"]
+          rec = str(row["email"]).strip()
 
           row_dict = row.to_dict()
-          row_dict["Name"] = row_dict.get("name", "Valued Partner")
-          row_dict["University"] = row_dict.get(
-              "university", "your institution"
+          row_dict["sender_name"] = sender_name
+          row_dict["Name"] = (
+              str(row_dict.get("name", "")).strip()
+              or str(row_dict.get("Name", "")).strip()
+              or "Valued Partner"
           )
-          row_dict["Department"] = row_dict.get("department", "your department")
+          row_dict["University"] = (
+              str(row_dict.get("university", "")).strip()
+              or str(row_dict.get("University", "")).strip()
+              or "your institution"
+          )
+          row_dict["Department"] = (
+              str(row_dict.get("department", "")).strip()
+              or str(row_dict.get("Department", "")).strip()
+              or "your department"
+          )
 
           rendered_fu_body = render_template(fu_body, row_dict)
           rendered_fu_subject = render_template(fu_subject, row_dict)
@@ -683,8 +731,9 @@ with tab2:
           msg["To"] = rec
           if cc_email.strip():
             msg["Cc"] = cc_email.strip()
-          msg["Subject"] = rendered_fu_subject
-          msg.attach(MIMEText(html_b, "html"))
+
+          msg["Subject"] = Header(rendered_fu_subject, "utf-8").encode()
+          msg.attach(MIMEText(html_b, "html", "utf-8"))
 
           recipients_list = [rec]
           if cc_email.strip():
@@ -692,17 +741,33 @@ with tab2:
 
           server.sendmail(sender_email, recipients_list, msg.as_string())
           log_followup_email(rec)
-          time.sleep(random.uniform(fu_delay_range[0], fu_delay_range[1]))
 
-        server.quit()
-        st.success("🎉 Follow-ups sent!")
+          actual_delay = round(
+              random.uniform(fu_delay_range[0], fu_delay_range[1]), 1
+          )
+          status_fu.text(
+              f"[{i+1}/{total_fu}] Follow-up sent to: {rec} (Waiting"
+              f" {actual_delay}s)"
+          )
+          progress_fu.progress((i + 1) / total_fu)
+          time.sleep(actual_delay)
+
+        st.success("🎉 Follow-ups sent successfully!")
       except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error sending follow-ups: {e}")
+      finally:
+        if server:
+          try:
+            server.quit()
+          except Exception:
+            pass
 
 # --- TAB 3: DATABASE LOG ---
 with tab3:
   st.header("📊 Campaign History & Records")
   conn = sqlite3.connect("campaigns.db")
-  all_logs = pd.read_sql_query("SELECT * FROM sent_emails", conn)
+  all_logs = pd.read_sql_query(
+      "SELECT * FROM sent_emails ORDER BY id DESC", conn
+  )
   conn.close()
   st.dataframe(all_logs)
