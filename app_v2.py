@@ -36,7 +36,6 @@ def init_db():
         )
     """)
 
-  # Migration checks for existing databases
   cursor.execute("PRAGMA table_info(sent_emails)")
   existing_cols = [col[1] for col in cursor.fetchall()]
 
@@ -196,7 +195,6 @@ def load_and_parse_file(uploaded_file):
   df = df.fillna("").astype(str)
   df.columns = [str(col).strip() for col in df.columns]
 
-  # 1. Identify Email column FIRST
   email_col = None
   for col in df.columns:
     if "email" in col.lower() or "mail" in col.lower():
@@ -214,7 +212,6 @@ def load_and_parse_file(uploaded_file):
   elif "Email" not in df.columns:
     df["Email"] = ""
 
-  # 2. Smart Column Mapping
   mapping_rules = {
       "Name": [
           "name",
@@ -264,11 +261,10 @@ def load_and_parse_file(uploaded_file):
         df.rename(columns={col: target_tag}, inplace=True)
         break
 
-  # Set defaults for core tags
   if "Name" not in df.columns:
     df["Name"] = "Valued Partner"
   if "Company" not in df.columns:
-    df["Company"] = "your company"
+    df["Company"] = "your organization"
   if "Designation" not in df.columns:
     df["Designation"] = "Purchase Manager"
   if "Department" not in df.columns:
@@ -276,7 +272,6 @@ def load_and_parse_file(uploaded_file):
   if "City" not in df.columns:
     df["City"] = "your area"
 
-  # Deduplicate column names
   cols = pd.Series(df.columns)
   for dup in cols[cols.duplicated()].unique():
     cols[cols == dup] = [
@@ -284,11 +279,9 @@ def load_and_parse_file(uploaded_file):
     ]
   df.columns = cols
 
-  # Filter valid emails
   df["Email"] = df["Email"].str.strip().str.lower()
   df = df[df["Email"].str.contains("@", na=False)].copy()
 
-  # 24-hour safeguard
   recent_emails = get_emails_sent_in_last_24h()
   initial_len = len(df)
   df = df[~df["Email"].isin(recent_emails)].copy()
@@ -298,7 +291,6 @@ def load_and_parse_file(uploaded_file):
 
 
 def render_template(template_str: str, row_dict: dict) -> str:
-  """Case-insensitive tag engine supports {tag}, {Tag}, and {TAG}."""
   rendered = template_str
   for key, value in row_dict.items():
     val_str = str(value).strip() if value is not None else ""
@@ -307,8 +299,8 @@ def render_template(template_str: str, row_dict: dict) -> str:
       k_lower = key.lower()
       if k_lower == "name":
         val_str = "Valued Partner"
-      elif k_lower == "company":
-        val_str = "your company"
+      elif k_lower in ["company", "university"]:
+        val_str = "your organization"
       elif k_lower in ["city", "location"]:
         val_str = "your area"
       else:
@@ -371,12 +363,10 @@ def check_inbox_for_replies(
 
 
 def build_html_body(text_content, custom_links=None, video_names=None):
-  """Builds clean HTML email with dynamic custom-named links and media attachments."""
   formatted_text = text_content.replace("\n", "<br>")
   links_html = ""
   highlight_style = "font-weight: bold; background-color: #fffacd; padding: 3px 6px; border-radius: 4px; text-decoration: underline;"
 
-  # Process Unlimited Custom Links
   if custom_links:
     link_items = "".join([
         f'<li style="margin-bottom: 8px;"><a href="{l["url"].strip()}"'
@@ -411,10 +401,10 @@ def build_html_body(text_content, custom_links=None, video_names=None):
 # ==========================================
 
 st.set_page_config(
-    page_title="Industrial Outreach Portal", page_icon="⚙️", layout="wide"
+    page_title="Outreach & CRM Portal", page_icon="📧", layout="wide"
 )
 
-st.title("✉️ Outreach & CRM Portal")
+st.title("📧 Outreach & CRM Portal")
 
 if "is_sending" not in st.session_state:
   st.session_state.is_sending = False
@@ -423,6 +413,14 @@ if "is_sending" not in st.session_state:
 if "custom_links" not in st.session_state:
   st.session_state.custom_links = [
       {"label": "Website & Product Catalog", "url": "https://evomachinery.in/"}
+  ]
+
+# Session State for Subject Variations
+if "subject_variations" not in st.session_state:
+  st.session_state.subject_variations = [
+      "Bearings & industrial supply partnership",
+      "Reliable bearing & component supply for {Company}",
+      "Industrial supply partnership opportunity — {Company}",
   ]
 
 # --- SIDEBAR CONFIGURATION ---
@@ -483,12 +481,71 @@ with tab1:
 
   st.header("2. Email Pitch Template")
 
-  sub_val = st.text_input(
-      "Subject Line",
-      value="Bearings & industrial supply partnership",
-      key="single_sub",
-      help="Subject Line. You can append placeholders like: Bearings & industrial supply partnership - {Company}",
+  # --- SUBJECT LINE MIXER & VARIATION UI ---
+  use_rotation = st.checkbox(
+      "🎲 Enable Subject Line Mixer / Random Variations (Prevents Spam"
+      " Filtering)",
+      value=False,
+      key="chk_sub_rot",
+      help=(
+          "When enabled, a random subject line from your list below will be"
+          " selected for each recipient."
+      ),
   )
+
+  active_subjects = []
+
+  if not use_rotation:
+    sub_val = st.text_input(
+        "Subject Line",
+        value="Bearings & industrial supply partnership",
+        key="single_sub",
+        help=(
+            "Subject Line. You can append placeholders like: Bearings &"
+            " industrial supply partnership - {Company}"
+        ),
+    )
+    active_subjects = (
+        [sub_val] if sub_val.strip() else ["Bearings & industrial supply partnership"]
+    )
+  else:
+    st.markdown("##### 🎲 Subject Line Variations (Max 5)")
+    st.caption(
+        "Customize your subjects below. The engine will randomly assign one per"
+        " recipient to bypass spam filters."
+    )
+
+    updated_subjects = []
+    for idx, sub_item in enumerate(st.session_state.subject_variations):
+      col_sub, col_del = st.columns([6, 0.6])
+      with col_sub:
+        s_val = st.text_input(
+            f"Subject Variation #{idx+1}",
+            value=sub_item,
+            key=f"sub_var_{idx}",
+            placeholder=(
+                "e.g. Bearings & industrial supply partnership - {Company}"
+            ),
+        )
+      with col_del:
+        st.write("")
+        st.write("")
+        if st.button("❌", key=f"del_sub_{idx}"):
+          st.session_state.subject_variations.pop(idx)
+          st.rerun()
+      updated_subjects.append(s_val)
+
+    st.session_state.subject_variations = updated_subjects
+    active_subjects = [
+        s for s in st.session_state.subject_variations if s.strip()
+    ]
+
+    if len(st.session_state.subject_variations) < 5:
+      if st.button("➕ Add Subject Variation"):
+        st.session_state.subject_variations.append("")
+        st.rerun()
+    else:
+      st.info("Maximum limit of 5 subject variations reached.")
 
   body_val = st.text_area(
       "Email Body",
@@ -529,7 +586,6 @@ Website: https://evomachinery.in/""",
         " button."
     )
 
-    # Dynamic Link Generator UI
     updated_links = []
     for idx, link_item in enumerate(st.session_state.custom_links):
       col_label, col_url, col_del = st.columns([2.5, 4, 0.6])
@@ -605,6 +661,8 @@ Website: https://evomachinery.in/""",
       st.error("Please enter Sender Email and App Password in the sidebar.")
     elif df_clean.empty:
       st.error("No valid recipient records found.")
+    elif not active_subjects:
+      st.error("Please provide at least one subject line variation.")
     else:
       st.session_state.is_sending = True
       server = None
@@ -635,7 +693,7 @@ Website: https://evomachinery.in/""",
               str(row_dict.get("Name", "")).strip() or "Valued Partner"
           )
           recipient_comp = (
-              str(row_dict.get("Company", "")).strip() or "your company"
+              str(row_dict.get("Company", "")).strip() or "your organization"
           )
           recipient_desig = (
               str(row_dict.get("Designation", "")).strip()
@@ -649,10 +707,12 @@ Website: https://evomachinery.in/""",
               str(row_dict.get("City", "")).strip() or "your area"
           )
 
-          rendered_body = render_template(body_val, row_dict)
-          rendered_subject = render_template(sub_val, row_dict)
+          # Pick random subject variation
+          chosen_sub_template = random.choice(active_subjects)
 
-          # Build HTML body with custom links list
+          rendered_body = render_template(body_val, row_dict)
+          rendered_subject = render_template(chosen_sub_template, row_dict)
+
           html_body = build_html_body(
               rendered_body,
               st.session_state.custom_links,
@@ -673,7 +733,6 @@ Website: https://evomachinery.in/""",
           msg_alt.attach(MIMEText(html_body, "html", "utf-8"))
           msg.attach(msg_alt)
 
-          # Attach Documents
           if attachments:
             for att in attachments:
               part = MIMEBase("application", "octet-stream")
@@ -684,7 +743,6 @@ Website: https://evomachinery.in/""",
               )
               msg.attach(part)
 
-          # Attach Videos
           if video_attachments:
             for vid in video_attachments:
               vid_part = MIMEBase("video", "octet-stream")
@@ -718,7 +776,7 @@ Website: https://evomachinery.in/""",
           time.sleep(actual_delay)
 
         if st.session_state.is_sending:
-          st.success("🎉 Industrial outreach campaign completed successfully!")
+          st.success("🎉 Outreach campaign completed successfully!")
         st.session_state.is_sending = False
 
       except Exception as e:
@@ -733,7 +791,7 @@ Website: https://evomachinery.in/""",
 
 # --- TAB 2: FOLLOW-UP MANAGER ---
 with tab2:
-  st.header("⏰ Industrial Auto Follow-Up Engine")
+  st.header("⏰ Auto Follow-Up Engine")
   col1, col2 = st.columns(2)
   with col1:
     days_thresh = st.number_input(
@@ -857,7 +915,7 @@ India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
 
 # --- TAB 3: DATABASE LOG ---
 with tab3:
-  st.header("📊 Campaign History & Database Logs")
+  st.header("📊 Campaign History & Records")
   conn = sqlite3.connect("campaigns.db")
   all_logs = pd.read_sql_query(
       "SELECT id, name, company, designation, department, city, email,"
