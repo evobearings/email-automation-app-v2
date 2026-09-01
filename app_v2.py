@@ -195,6 +195,7 @@ def load_and_parse_file(uploaded_file):
   df = df.fillna("").astype(str)
   df.columns = [str(col).strip() for col in df.columns]
 
+  # 1. Identify Email column FIRST
   email_col = None
   for col in df.columns:
     if "email" in col.lower() or "mail" in col.lower():
@@ -212,6 +213,7 @@ def load_and_parse_file(uploaded_file):
   elif "Email" not in df.columns:
     df["Email"] = ""
 
+  # 2. Universal Column Mapping Rules
   mapping_rules = {
       "Name": [
           "name",
@@ -261,6 +263,7 @@ def load_and_parse_file(uploaded_file):
         df.rename(columns={col: target_tag}, inplace=True)
         break
 
+  # Set defaults for core tags
   if "Name" not in df.columns:
     df["Name"] = "Valued Partner"
   if "Company" not in df.columns:
@@ -272,6 +275,7 @@ def load_and_parse_file(uploaded_file):
   if "City" not in df.columns:
     df["City"] = "your area"
 
+  # Deduplicate column names
   cols = pd.Series(df.columns)
   for dup in cols[cols.duplicated()].unique():
     cols[cols == dup] = [
@@ -279,9 +283,22 @@ def load_and_parse_file(uploaded_file):
     ]
   df.columns = cols
 
+  # --- MULTI-EMAIL CELL SANITIZER ---
+  # Automatically split multi-email cells (e.g. email1@test.com;email2@test.com) and keep the first one
+  df["Email"] = (
+      df["Email"]
+      .str.replace(";", ",")
+      .str.split(",")
+      .str[0]
+      .str.strip()
+      .str.replace("\n", "")
+  )
+
+  # Clean & filter valid emails
   df["Email"] = df["Email"].str.strip().str.lower()
   df = df[df["Email"].str.contains("@", na=False)].copy()
 
+  # 24-hour safeguard
   recent_emails = get_emails_sent_in_last_24h()
   initial_len = len(df)
   df = df[~df["Email"].isin(recent_emails)].copy()
@@ -291,6 +308,7 @@ def load_and_parse_file(uploaded_file):
 
 
 def render_template(template_str: str, row_dict: dict) -> str:
+  """Case-insensitive tag engine supports {tag}, {Tag}, and {TAG}."""
   rendered = template_str
   for key, value in row_dict.items():
     val_str = str(value).strip() if value is not None else ""
@@ -707,7 +725,6 @@ Website: https://evomachinery.in/""",
               str(row_dict.get("City", "")).strip() or "your area"
           )
 
-          # Pick random subject variation
           chosen_sub_template = random.choice(active_subjects)
 
           rendered_body = render_template(body_val, row_dict)
