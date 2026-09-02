@@ -283,19 +283,14 @@ def load_and_parse_file(uploaded_file):
     ]
   df.columns = cols
 
-  # --- MULTI-EMAIL CELL SANITIZER ---
-  # Automatically split multi-email cells (e.g. email1@test.com;email2@test.com) and keep the first one
-  df["Email"] = (
-      df["Email"]
-      .str.replace(";", ",")
-      .str.split(",")
-      .str[0]
-      .str.strip()
-      .str.replace("\n", "")
-  )
+  # --- BULLETPROOF MULTI-EMAIL SANITIZER ---
+  # Automatically extracts the first valid email address, handling slashes (/), semicolons (;), commas (,), spaces, and newlines
+  extracted_email = df["Email"].str.extract(
+      r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
+  )[0]
+  df["Email"] = extracted_email.fillna("").str.strip().str.lower()
 
   # Clean & filter valid emails
-  df["Email"] = df["Email"].str.strip().str.lower()
   df = df[df["Email"].str.contains("@", na=False)].copy()
 
   # 24-hour safeguard
