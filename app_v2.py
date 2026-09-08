@@ -284,7 +284,6 @@ def load_and_parse_file(uploaded_file):
   df.columns = cols
 
   # --- BULLETPROOF MULTI-EMAIL SANITIZER ---
-  # Automatically extracts the first valid email address, handling slashes (/), semicolons (;), commas (,), spaces, and newlines
   extracted_email = df["Email"].str.extract(
       r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
   )[0]
@@ -446,9 +445,20 @@ sender_email = st.sidebar.text_input("Sender Email", value="evobearings@gmail.co
 sender_password = st.sidebar.text_input(
     "App Password (16-char)", type="password"
 )
-cc_email = st.sidebar.text_input(
-    "CC Recipient (Optional)", value="lakshyarajdevgurujaiswal@gmail.com"
+
+# Optional CC Toggle (Disabled by default)
+enable_cc = st.sidebar.checkbox(
+    "Enable CC Recipient",
+    value=False,
+    help="Check to send a copy of every outgoing email to a CC address (Note: Uses extra daily sending quota)",
 )
+
+if enable_cc:
+  cc_email = st.sidebar.text_input(
+      "CC Recipient Email", value="lakshyarajdevgurujaiswal@gmail.com"
+  )
+else:
+  cc_email = ""
 
 smtp_server = st.sidebar.text_input("SMTP Server", value="smtp.gmail.com")
 smtp_port = st.sidebar.number_input("SMTP Port", value=587)
