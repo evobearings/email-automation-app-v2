@@ -7,54 +7,67 @@ from email.mime.text import MIMEText
 import random
 import re
 import smtplib
-import sqlite3
 import time
 import imapclient
 import pandas as pd
+import psycopg2
 import streamlit as st
 
 # ==========================================
-# 1. DATABASE MANAGEMENT (SQLite)
+# 1. DATABASE MANAGEMENT (Supabase PostgreSQL)
 # ==========================================
+
+DB_URL = st.secrets.get("DATABASE_URL", "")
+
+
+def get_db_connection():
+  if not DB_URL:
+    st.error(
+        "❌ DATABASE_URL secret is missing in Streamlit Cloud. Please add it in"
+        " App Settings -> Secrets."
+    )
+    st.stop()
+
+  # Enforce SSL connection for Supabase
+  if "sslmode" not in DB_URL:
+    url = (
+        f"{DB_URL}?sslmode=require"
+        if "?" not in DB_URL
+        else f"{DB_URL}&sslmode=require"
+    )
+  else:
+    url = DB_URL
+
+  return psycopg2.connect(url, connect_timeout=10)
 
 
 def init_db():
-  conn = sqlite3.connect("campaigns.db")
-  cursor = conn.cursor()
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sent_emails (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            company TEXT,
-            designation TEXT,
-            department TEXT,
-            city TEXT,
-            email TEXT UNIQUE,
-            initial_sent_date TIMESTAMP,
-            status TEXT DEFAULT 'Pending',
-            followup_sent_date TIMESTAMP
-        )
-    """)
-
-  cursor.execute("PRAGMA table_info(sent_emails)")
-  existing_cols = [col[1] for col in cursor.fetchall()]
-
-  new_cols = {
-      "company": "TEXT DEFAULT ''",
-      "designation": "TEXT DEFAULT ''",
-      "department": "TEXT DEFAULT ''",
-      "city": "TEXT DEFAULT ''",
-      "university": "TEXT DEFAULT ''",
-  }
-
-  for col_name, col_def in new_cols.items():
-    if col_name not in existing_cols:
-      cursor.execute(
-          f"ALTER TABLE sent_emails ADD COLUMN {col_name} {col_def}"
-      )
-
-  conn.commit()
-  conn.close()
+  if not DB_URL:
+    return
+  conn = get_db_connection()
+  try:
+    cursor = conn.cursor()
+    cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sent_emails (
+                id SERIAL PRIMARY KEY,
+                name TEXT,
+                company TEXT DEFAULT '',
+                designation TEXT DEFAULT '',
+                department TEXT DEFAULT '',
+                city TEXT DEFAULT '',
+                university TEXT DEFAULT '',
+                email TEXT UNIQUE,
+                initial_sent_date TIMESTAMP,
+                status TEXT DEFAULT 'Pending',
+                followup_sent_date TIMESTAMP
+            );
+        """)
+    conn.commit()
+    cursor.close()
+  except Exception as e:
+    st.error(f"Failed to connect to Supabase database: {e}")
+  finally:
+    conn.close()
 
 
 def log_initial_email(
@@ -65,109 +78,127 @@ def log_initial_email(
     department: str = "",
     city: str = "",
 ):
-  conn = sqlite3.connect("campaigns.db")
-  cursor = conn.cursor()
-  now = datetime.now()
-  cursor.execute(
-      """
-        INSERT INTO sent_emails (name, company, designation, department, city, email, initial_sent_date, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')
-        ON CONFLICT(email) DO UPDATE SET
-            name=?,
-            company=?,
-            designation=?,
-            department=?,
-            city=?,
-            initial_sent_date=?,
-            status='Pending'
-    """,
-      (
-          name,
-          company,
-          designation,
-          department,
-          city,
-          email.lower(),
-          now,
-          name,
-          company,
-          designation,
-          department,
-          city,
-          now,
-      ),
-  )
-  conn.commit()
-  conn.close()
+  if not DB_URL:
+    return
+  conn = get_db_connection()
+  try:
+    cursor = conn.cursor()
+    now = datetime.now()
+
+    query = """
+            INSERT INTO sent_emails (name, company, designation, department, city, email, initial_sent_date, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'Pending')
+            ON CONFLICT(email) DO UPDATE SET
+                name = EXCLUDED.name,
+                company = EXCLUDED.company,
+                designation = EXCLUDED.designation,
+                department = EXCLUDED.department,
+                city = EXCLUDED.city,
+                initial_sent_date = EXCLUDED.initial_sent_date,
+                status = 'Pending';
+        """
+    cursor.execute(
+        query,
+        (
+            name,
+            company,
+            designation,
+            department,
+            city,
+            email.lower(),
+            now,
+        ),
+    )
+    conn.commit()
+    cursor.close()
+  finally:
+    conn.close()
 
 
 def log_followup_email(email: str):
-  conn = sqlite3.connect("campaigns.db")
-  cursor = conn.cursor()
-  now = datetime.now()
-  cursor.execute(
-      """
-        UPDATE sent_emails
-        SET status = 'Follow-up Sent', followup_sent_date = ?
-        WHERE LOWER(email) = LOWER(?)
-    """,
-      (now, email),
-  )
-  conn.commit()
-  conn.close()
-
-
-def get_emails_sent_in_last_24h() -> set:
-  conn = sqlite3.connect("campaigns.db")
-  cutoff_time = datetime.now() - timedelta(hours=24)
-  cursor = conn.cursor()
-  cursor.execute(
-      """
-        SELECT LOWER(email) FROM sent_emails
-        WHERE initial_sent_date >= ? OR followup_sent_date >= ?
-    """,
-      (cutoff_time, cutoff_time),
-  )
-  rows = cursor.fetchall()
-  conn.close()
-  return {row[0] for row in rows}
-
-
-def update_reply_status(replied_emails: list):
-  if not replied_emails:
-    return 0
-  conn = sqlite3.connect("campaigns.db")
-  cursor = conn.cursor()
-  count = 0
-  for email in replied_emails:
+  if not DB_URL:
+    return
+  conn = get_db_connection()
+  try:
+    cursor = conn.cursor()
+    now = datetime.now()
     cursor.execute(
         """
             UPDATE sent_emails
-            SET status = 'Replied'
-            WHERE LOWER(email) = LOWER(?) AND status != 'Replied'
+            SET status = 'Follow-up Sent', followup_sent_date = %s
+            WHERE LOWER(email) = LOWER(%s)
         """,
-        (email,),
+        (now, email),
     )
-    count += cursor.rowcount
-  conn.commit()
-  conn.close()
-  return count
+    conn.commit()
+    cursor.close()
+  finally:
+    conn.close()
+
+
+def get_emails_sent_in_last_24h() -> set:
+  if not DB_URL:
+    return set()
+  conn = get_db_connection()
+  try:
+    cutoff_time = datetime.now() - timedelta(hours=24)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+            SELECT LOWER(email) FROM sent_emails
+            WHERE initial_sent_date >= %s OR followup_sent_date >= %s
+        """,
+        (cutoff_time, cutoff_time),
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    return {row[0] for row in rows}
+  finally:
+    conn.close()
+
+
+def update_reply_status(replied_emails: list):
+  if not replied_emails or not DB_URL:
+    return 0
+  conn = get_db_connection()
+  try:
+    cursor = conn.cursor()
+    count = 0
+    for email in replied_emails:
+      cursor.execute(
+          """
+                UPDATE sent_emails
+                SET status = 'Replied'
+                WHERE LOWER(email) = LOWER(%s) AND status != 'Replied'
+            """,
+          (email,),
+      )
+      count += cursor.rowcount
+    conn.commit()
+    cursor.close()
+    return count
+  finally:
+    conn.close()
 
 
 def fetch_followup_candidates(days_threshold=15):
-  conn = sqlite3.connect("campaigns.db")
-  cutoff_date = datetime.now() - timedelta(days=days_threshold)
-  df = pd.read_sql_query(
-      """
-        SELECT id, name, company, designation, department, city, email, initial_sent_date, status
-        FROM sent_emails
-        WHERE status = 'Pending' AND initial_sent_date <= ?
-    """,
-      conn,
-      params=(cutoff_date,),
-  )
-  conn.close()
-  return df
+  if not DB_URL:
+    return pd.DataFrame()
+  conn = get_db_connection()
+  try:
+    cutoff_date = datetime.now() - timedelta(days=days_threshold)
+    df = pd.read_sql_query(
+        """
+            SELECT id, name, company, designation, department, city, email, initial_sent_date, status
+            FROM sent_emails
+            WHERE status = 'Pending' AND initial_sent_date <= %s
+        """,
+        conn,
+        params=(cutoff_date,),
+    )
+    return df
+  finally:
+    conn.close()
 
 
 init_db()
@@ -275,13 +306,17 @@ def load_and_parse_file(uploaded_file):
   if "City" not in df.columns:
     df["City"] = "your area"
 
-  # Deduplicate column names
-  cols = pd.Series(df.columns)
-  for dup in cols[cols.duplicated()].unique():
-    cols[cols == dup] = [
-        f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))
-    ]
-  df.columns = cols
+  # Safe Column Deduplication
+  new_cols = []
+  seen = {}
+  for col in df.columns:
+    if col in seen:
+      seen[col] += 1
+      new_cols.append(f"{col}_{seen[col]}")
+    else:
+      seen[col] = 0
+      new_cols.append(col)
+  df.columns = new_cols
 
   # --- BULLETPROOF MULTI-EMAIL SANITIZER ---
   extracted_email = df["Email"].str.extract(
@@ -418,6 +453,12 @@ st.set_page_config(
 
 st.title("📧 Outreach & CRM Portal")
 
+if not DB_URL:
+  st.error(
+      "⚠️ Database connection secret missing! Please add DATABASE_URL to your"
+      " Streamlit Cloud secrets."
+  )
+
 if "is_sending" not in st.session_state:
   st.session_state.is_sending = False
 
@@ -435,22 +476,79 @@ if "subject_variations" not in st.session_state:
       "Industrial supply partnership opportunity — {Company}",
   ]
 
+# Session State for Multi-Account Rotation
+if "sender_accounts" not in st.session_state:
+  st.session_state.sender_accounts = [
+      {"email": "evobearings@gmail.com", "password": ""}
+  ]
+
 # --- SIDEBAR CONFIGURATION ---
-st.sidebar.header("⚙️ Sender Credentials")
+st.sidebar.header("⚙️ Sender Credentials & Accounts")
 sender_name = st.sidebar.text_input(
     "Sender Display Name",
     value="Lakshya Raj Devguru Jaiswal | EVO Bearings & Mill Stores",
 )
-sender_email = st.sidebar.text_input("Sender Email", value="evobearings@gmail.com")
-sender_password = st.sidebar.text_input(
-    "App Password (16-char)", type="password"
+
+st.sidebar.markdown("##### 👥 Multi-Account Rotation")
+st.sidebar.caption(
+    "Add multiple accounts to bypass daily Gmail limits. The engine will"
+    " automatically rotate accounts during campaigns."
 )
+
+updated_accounts = []
+for idx, acc in enumerate(st.session_state.sender_accounts):
+  st.sidebar.markdown(f"**Account #{idx+1}**")
+  col_acc_e, col_acc_p = st.sidebar.columns([1, 1])
+  with col_acc_e:
+    acc_e = st.text_input(
+        f"Email #{idx+1}",
+        value=acc["email"],
+        key=f"acc_email_{idx}",
+        placeholder="email@gmail.com",
+    )
+  with col_acc_p:
+    acc_p = st.text_input(
+        f"App Password #{idx+1}",
+        value=acc["password"],
+        type="password",
+        key=f"acc_pass_{idx}",
+        placeholder="16-char code",
+    )
+
+  updated_accounts.append({"email": acc_e, "password": acc_p})
+
+st.session_state.sender_accounts = updated_accounts
+
+if len(st.session_state.sender_accounts) > 1:
+  if st.sidebar.button("❌ Remove Last Account"):
+    st.session_state.sender_accounts.pop()
+    st.rerun()
+
+if st.sidebar.button("➕ Add Sender Account"):
+  st.session_state.sender_accounts.append({"email": "", "password": ""})
+  st.rerun()
+
+emails_per_account_limit = st.sidebar.number_input(
+    "Max Emails Per Account Before Rotation",
+    min_value=1,
+    max_value=500,
+    value=100,
+    help=(
+        "The engine automatically switches to the next account after sending"
+        " this many emails."
+    ),
+)
+
+st.sidebar.markdown("---")
 
 # Optional CC Toggle (Disabled by default)
 enable_cc = st.sidebar.checkbox(
     "Enable CC Recipient",
     value=False,
-    help="Check to send a copy of every outgoing email to a CC address (Note: Uses extra daily sending quota)",
+    help=(
+        "Check to send a copy of every outgoing email to a CC address (Note:"
+        " Uses extra daily sending quota)"
+    ),
 )
 
 if enable_cc:
@@ -472,6 +570,17 @@ imap_server = st.sidebar.text_input("IMAP Server", value="imap.gmail.com")
 tab1, tab2, tab3 = st.tabs(
     ["🚀 Launch Campaign", "⏰ Follow-Up Manager (15 Days)", "📊 Database Log"]
 )
+
+
+def connect_smtp_account(account):
+  if use_ssl:
+    server = smtplib.SMTP_SSL(smtp_server, int(smtp_port), timeout=120)
+  else:
+    server = smtplib.SMTP(smtp_server, int(smtp_port), timeout=120)
+    server.starttls()
+  server.login(account["email"].strip(), account["password"].strip())
+  return server
+
 
 # --- TAB 1: LAUNCH CAMPAIGN ---
 with tab1:
@@ -504,7 +613,6 @@ with tab1:
 
   st.header("2. Email Pitch Template")
 
-  # --- SUBJECT LINE MIXER & VARIATION UI ---
   use_rotation = st.checkbox(
       "🎲 Enable Subject Line Mixer / Random Variations (Prevents Spam"
       " Filtering)",
@@ -677,11 +785,20 @@ Website: https://evomachinery.in/""",
     st.session_state.is_sending = False
     st.warning("Campaign halted.")
 
+  valid_accounts = [
+      acc
+      for acc in st.session_state.sender_accounts
+      if acc["email"].strip() and acc["password"].strip()
+  ]
+
   if start_clicked:
     if not uploaded_file:
       st.error("Please upload an Excel or CSV file first.")
-    elif not sender_email or not sender_password:
-      st.error("Please enter Sender Email and App Password in the sidebar.")
+    elif not valid_accounts:
+      st.error(
+          "Please enter at least one Sender Email and App Password in the"
+          " sidebar."
+      )
     elif df_clean.empty:
       st.error("No valid recipient records found.")
     elif not active_subjects:
@@ -689,14 +806,12 @@ Website: https://evomachinery.in/""",
     else:
       st.session_state.is_sending = True
       server = None
-      try:
-        if use_ssl:
-          server = smtplib.SMTP_SSL(smtp_server, int(smtp_port), timeout=120)
-        else:
-          server = smtplib.SMTP(smtp_server, int(smtp_port), timeout=120)
-          server.starttls()
+      current_acc_idx = 0
+      current_acc_sent_count = 0
 
-        server.login(sender_email, sender_password)
+      try:
+        active_account = valid_accounts[current_acc_idx]
+        server = connect_smtp_account(active_account)
 
         progress = st.progress(0)
         status_msg = st.empty()
@@ -707,6 +822,26 @@ Website: https://evomachinery.in/""",
           if not st.session_state.is_sending:
             status_msg.warning("Interrupted by user.")
             break
+
+          if (
+              current_acc_sent_count >= emails_per_account_limit
+              and len(valid_accounts) > 1
+          ):
+            try:
+              server.quit()
+            except Exception:
+              pass
+
+            current_acc_idx = (current_acc_idx + 1) % len(valid_accounts)
+            current_acc_sent_count = 0
+            active_account = valid_accounts[current_acc_idx]
+
+            status_msg.info(
+                f"🔄 Rotated sender account to: {active_account['email']}"
+            )
+            server = connect_smtp_account(active_account)
+
+          active_sender_email = active_account["email"].strip()
 
           row_dict = row.to_dict()
           row_dict["sender_name"] = sender_name
@@ -744,7 +879,7 @@ Website: https://evomachinery.in/""",
           )
 
           msg = MIMEMultipart("mixed")
-          msg["From"] = f"{sender_name} <{sender_email}>"
+          msg["From"] = f"{sender_name} <{active_sender_email}>"
           msg["To"] = recipient_email
           if cc_email.strip():
             msg["Cc"] = cc_email.strip()
@@ -779,7 +914,7 @@ Website: https://evomachinery.in/""",
           if cc_email.strip():
             recipients_list.append(cc_email.strip())
 
-          server.sendmail(sender_email, recipients_list, msg.as_string())
+          server.sendmail(active_sender_email, recipients_list, msg.as_string())
           log_initial_email(
               recipient_name,
               recipient_email,
@@ -789,10 +924,12 @@ Website: https://evomachinery.in/""",
               recipient_city,
           )
 
+          current_acc_sent_count += 1
           actual_delay = round(random.uniform(min_sec, max_sec), 1)
+
           status_msg.text(
-              f"[{i+1}/{total}] Sent to: {recipient_email} ({recipient_comp})"
-              f' | Subject: "{rendered_subject}" (Waiting {actual_delay}s)'
+              f"[{i+1}/{total}] Sent from ({active_sender_email}) to:"
+              f" {recipient_email} ({recipient_comp}) | Waiting {actual_delay}s"
           )
           progress.progress((i + 1) / total)
           time.sleep(actual_delay)
@@ -821,11 +958,12 @@ with tab2:
     )
   with col2:
     if st.button("🔄 Sync Inbox & Detect Replies (IMAP)", key="sync_btn"):
-      if not sender_email or not sender_password:
+      if not valid_accounts:
         st.error("Provide credentials in sidebar.")
       else:
+        first_acc = valid_accounts[0]
         senders, err = check_inbox_for_replies(
-            sender_email, sender_password, imap_server
+            first_acc["email"], first_acc["password"], imap_server
         )
         if err:
           st.error(f"IMAP Sync Failed: {err}")
@@ -873,20 +1011,33 @@ India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
 
     if st.button("🚀 Start Follow-Ups", key="start2"):
       server = None
-      try:
-        if use_ssl:
-          server = smtplib.SMTP_SSL(smtp_server, int(smtp_port), timeout=120)
-        else:
-          server = smtplib.SMTP(smtp_server, int(smtp_port), timeout=120)
-          server.starttls()
+      current_acc_idx = 0
+      current_acc_sent_count = 0
 
-        server.login(sender_email, sender_password)
+      try:
+        active_account = valid_accounts[current_acc_idx]
+        server = connect_smtp_account(active_account)
 
         progress_fu = st.progress(0)
         status_fu = st.empty()
         total_fu = len(candidates)
 
         for i, (_, row) in enumerate(candidates.iterrows()):
+          if (
+              current_acc_sent_count >= emails_per_account_limit
+              and len(valid_accounts) > 1
+          ):
+            try:
+              server.quit()
+            except Exception:
+              pass
+
+            current_acc_idx = (current_acc_idx + 1) % len(valid_accounts)
+            current_acc_sent_count = 0
+            active_account = valid_accounts[current_acc_idx]
+            server = connect_smtp_account(active_account)
+
+          active_sender_email = active_account["email"].strip()
           rec = str(row["email"]).strip()
 
           row_dict = row.to_dict()
@@ -900,7 +1051,7 @@ India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
           )
 
           msg = MIMEMultipart("alternative")
-          msg["From"] = f"{sender_name} <{sender_email}>"
+          msg["From"] = f"{sender_name} <{active_sender_email}>"
           msg["To"] = rec
           if cc_email.strip():
             msg["Cc"] = cc_email.strip()
@@ -912,15 +1063,16 @@ India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
           if cc_email.strip():
             recipients_list.append(cc_email.strip())
 
-          server.sendmail(sender_email, recipients_list, msg.as_string())
+          server.sendmail(active_sender_email, recipients_list, msg.as_string())
           log_followup_email(rec)
 
+          current_acc_sent_count += 1
           actual_delay = round(
               random.uniform(fu_delay_range[0], fu_delay_range[1]), 1
           )
           status_fu.text(
-              f"[{i+1}/{total_fu}] Follow-up sent to: {rec} (Waiting"
-              f" {actual_delay}s)"
+              f"[{i+1}/{total_fu}] Follow-up sent from ({active_sender_email})"
+              f" to: {rec} (Waiting {actual_delay}s)"
           )
           progress_fu.progress((i + 1) / total_fu)
           time.sleep(actual_delay)
@@ -938,12 +1090,19 @@ India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
 # --- TAB 3: DATABASE LOG ---
 with tab3:
   st.header("📊 Campaign History & Records")
-  conn = sqlite3.connect("campaigns.db")
-  all_logs = pd.read_sql_query(
-      "SELECT id, name, company, designation, department, city, email,"
-      " initial_sent_date, status, followup_sent_date FROM sent_emails ORDER"
-      " BY id DESC",
-      conn,
-  )
-  conn.close()
-  st.dataframe(all_logs)
+  if DB_URL:
+    conn = get_db_connection()
+    try:
+      all_logs = pd.read_sql_query(
+          "SELECT id, name, company, designation, department, city, email,"
+          " initial_sent_date, status, followup_sent_date FROM sent_emails ORDER"
+          " BY id DESC",
+          conn,
+      )
+      st.dataframe(all_logs)
+    except Exception as e:
+      st.error(f"Could not load database records: {e}")
+    finally:
+      conn.close()
+  else:
+    st.warning("Database URL is not configured.")
