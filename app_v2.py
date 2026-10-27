@@ -44,8 +44,8 @@ def get_db_connection():
 def init_db():
   if not DB_URL:
     return
-  conn = get_db_connection()
   try:
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
             CREATE TABLE IF NOT EXISTS sent_emails (
@@ -64,10 +64,9 @@ def init_db():
         """)
     conn.commit()
     cursor.close()
+    conn.close()
   except Exception as e:
     st.error(f"Failed to connect to Supabase database: {e}")
-  finally:
-    conn.close()
 
 
 def log_initial_email(
@@ -81,124 +80,114 @@ def log_initial_email(
   if not DB_URL:
     return
   conn = get_db_connection()
-  try:
-    cursor = conn.cursor()
-    now = datetime.now()
+  cursor = conn.cursor()
+  now = datetime.now()
 
-    query = """
-            INSERT INTO sent_emails (name, company, designation, department, city, email, initial_sent_date, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'Pending')
-            ON CONFLICT(email) DO UPDATE SET
-                name = EXCLUDED.name,
-                company = EXCLUDED.company,
-                designation = EXCLUDED.designation,
-                department = EXCLUDED.department,
-                city = EXCLUDED.city,
-                initial_sent_date = EXCLUDED.initial_sent_date,
-                status = 'Pending';
-        """
-    cursor.execute(
-        query,
-        (
-            name,
-            company,
-            designation,
-            department,
-            city,
-            email.lower(),
-            now,
-        ),
-    )
-    conn.commit()
-    cursor.close()
-  finally:
-    conn.close()
+  query = """
+        INSERT INTO sent_emails (name, company, designation, department, city, email, initial_sent_date, status)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'Pending')
+        ON CONFLICT(email) DO UPDATE SET
+            name = EXCLUDED.name,
+            company = EXCLUDED.company,
+            designation = EXCLUDED.designation,
+            department = EXCLUDED.department,
+            city = EXCLUDED.city,
+            initial_sent_date = EXCLUDED.initial_sent_date,
+            status = 'Pending';
+    """
+  cursor.execute(
+      query,
+      (
+          name,
+          company,
+          designation,
+          department,
+          city,
+          email.lower(),
+          now,
+      ),
+  )
+  conn.commit()
+  cursor.close()
+  conn.close()
 
 
 def log_followup_email(email: str):
   if not DB_URL:
     return
   conn = get_db_connection()
-  try:
-    cursor = conn.cursor()
-    now = datetime.now()
-    cursor.execute(
-        """
-            UPDATE sent_emails
-            SET status = 'Follow-up Sent', followup_sent_date = %s
-            WHERE LOWER(email) = LOWER(%s)
-        """,
-        (now, email),
-    )
-    conn.commit()
-    cursor.close()
-  finally:
-    conn.close()
+  cursor = conn.cursor()
+  now = datetime.now()
+  cursor.execute(
+      """
+        UPDATE sent_emails
+        SET status = 'Follow-up Sent', followup_sent_date = %s
+        WHERE LOWER(email) = LOWER(%s)
+    """,
+      (now, email),
+  )
+  conn.commit()
+  cursor.close()
+  conn.close()
 
 
 def get_emails_sent_in_last_24h() -> set:
   if not DB_URL:
     return set()
   conn = get_db_connection()
-  try:
-    cutoff_time = datetime.now() - timedelta(hours=24)
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-            SELECT LOWER(email) FROM sent_emails
-            WHERE initial_sent_date >= %s OR followup_sent_date >= %s
-        """,
-        (cutoff_time, cutoff_time),
-    )
-    rows = cursor.fetchall()
-    cursor.close()
-    return {row[0] for row in rows}
-  finally:
-    conn.close()
+  cutoff_time = datetime.now() - timedelta(hours=24)
+  cursor = conn.cursor()
+  cursor.execute(
+      """
+        SELECT LOWER(email) FROM sent_emails
+        WHERE initial_sent_date >= %s OR followup_sent_date >= %s
+    """,
+      (cutoff_time, cutoff_time),
+  )
+  rows = cursor.fetchall()
+  cursor.close()
+  conn.close()
+  return {row[0] for row in rows}
 
 
 def update_reply_status(replied_emails: list):
   if not replied_emails or not DB_URL:
     return 0
   conn = get_db_connection()
-  try:
-    cursor = conn.cursor()
-    count = 0
-    for email in replied_emails:
-      cursor.execute(
-          """
-                UPDATE sent_emails
-                SET status = 'Replied'
-                WHERE LOWER(email) = LOWER(%s) AND status != 'Replied'
-            """,
-          (email,),
-      )
-      count += cursor.rowcount
-    conn.commit()
-    cursor.close()
-    return count
-  finally:
-    conn.close()
+  cursor = conn.cursor()
+  count = 0
+  for email in replied_emails:
+    cursor.execute(
+        """
+            UPDATE sent_emails
+            SET status = 'Replied'
+            WHERE LOWER(email) = LOWER(%s) AND status != 'Replied'
+        """,
+        (email,),
+    )
+    count += cursor.rowcount
+  conn.commit()
+  cursor.close()
+  conn.close()
+  return count
 
 
 def fetch_followup_candidates(days_threshold=15):
   if not DB_URL:
     return pd.DataFrame()
   conn = get_db_connection()
-  try:
-    cutoff_date = datetime.now() - timedelta(days=days_threshold)
-    df = pd.read_sql_query(
-        """
-            SELECT id, name, company, designation, department, city, email, initial_sent_date, status
-            FROM sent_emails
-            WHERE status = 'Pending' AND initial_sent_date <= %s
-        """,
-        conn,
-        params=(cutoff_date,),
-    )
-    return df
-  finally:
-    conn.close()
+  cutoff_date = datetime.now() - timedelta(days=days_threshold)
+  df = pd.read_sql_query(
+      """
+        SELECT id, name, company, designation, department, city, email, initial_sent_date, status
+        FROM sent_emails
+        WHERE status = 'Pending' AND initial_sent_date <= %s
+    """,
+      conn,
+      params=(cutoff_date,),
+  )
+  conn.close()
+  return df
 
 
 init_db()
@@ -306,17 +295,13 @@ def load_and_parse_file(uploaded_file):
   if "City" not in df.columns:
     df["City"] = "your area"
 
-  # Safe Column Deduplication
-  new_cols = []
-  seen = {}
-  for col in df.columns:
-    if col in seen:
-      seen[col] += 1
-      new_cols.append(f"{col}_{seen[col]}")
-    else:
-      seen[col] = 0
-      new_cols.append(col)
-  df.columns = new_cols
+  # Deduplicate column names
+  cols = pd.Series(df.columns)
+  for dup in cols[cols.duplicated()].unique():
+    cols[cols == dup] = [
+        f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))
+    ]
+  df.columns = cols
 
   # --- BULLETPROOF MULTI-EMAIL SANITIZER ---
   extracted_email = df["Email"].str.extract(
@@ -515,14 +500,14 @@ for idx, acc in enumerate(st.session_state.sender_accounts):
         placeholder="16-char code",
     )
 
+  if len(st.session_state.sender_accounts) > 1:
+    if st.sidebar.button(f"❌ Remove Account #{idx+1}", key=f"del_acc_{idx}"):
+      st.session_state.sender_accounts.pop(idx)
+      st.rerun()
+
   updated_accounts.append({"email": acc_e, "password": acc_p})
 
 st.session_state.sender_accounts = updated_accounts
-
-if len(st.session_state.sender_accounts) > 1:
-  if st.sidebar.button("❌ Remove Last Account"):
-    st.session_state.sender_accounts.pop()
-    st.rerun()
 
 if st.sidebar.button("➕ Add Sender Account"):
   st.session_state.sender_accounts.append({"email": "", "password": ""})
@@ -1091,18 +1076,17 @@ India Bearings & Mill Stores | EVO Bearings and Machineries Pvt. Ltd.
 with tab3:
   st.header("📊 Campaign History & Records")
   if DB_URL:
-    conn = get_db_connection()
     try:
+      conn = get_db_connection()
       all_logs = pd.read_sql_query(
           "SELECT id, name, company, designation, department, city, email,"
           " initial_sent_date, status, followup_sent_date FROM sent_emails ORDER"
           " BY id DESC",
           conn,
       )
+      conn.close()
       st.dataframe(all_logs)
     except Exception as e:
       st.error(f"Could not load database records: {e}")
-    finally:
-      conn.close()
   else:
     st.warning("Database URL is not configured.")
